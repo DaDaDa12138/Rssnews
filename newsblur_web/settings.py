@@ -63,11 +63,11 @@ def env_int(name, default):
 # = Server Settings =
 # ===================
 
-ADMINS = (("NewsBlur", os.environ.get("ADMIN_EMAIL", "admin@localhost")),)
+ADMINS = (("NewsBlur", os.environ.get("ADMIN_EMAIL") or "admin@localhost"),)
 MANAGERS = ADMINS
 
 SERVER_NAME = os.environ.get("SERVER_NAME", "localhost")
-SERVER_EMAIL = os.environ.get("SERVER_EMAIL", "newsblur@localhost")
+SERVER_EMAIL = os.environ.get("SERVER_EMAIL") or "newsblur@localhost"
 HELLO_EMAIL = os.environ.get("HELLO_EMAIL", "hello@localhost")
 DEFAULT_FROM_EMAIL = SERVER_EMAIL
 
@@ -79,7 +79,10 @@ PUSH_DOMAIN = os.environ.get("PUSH_DOMAIN", "localhost")
 # image proxy in the personal edition.
 IMAGES_URL = os.environ.get("IMAGES_URL", "")
 
-SECRET_KEY = os.environ.get("SECRET_KEY", "personal-edition-secret-key-change-me")
+# compose passes SECRET_KEY through even when .env leaves it blank, and an empty
+# string would reach Django as-is and fail every request, so fall back to the
+# development default unless a real value is present.
+SECRET_KEY = os.environ.get("SECRET_KEY") or "personal-edition-secret-key-change-me"
 DOCKERBUILD = env_bool("DOCKERBUILD", True)
 
 # ===================
@@ -98,7 +101,7 @@ TEST_DEBUG = False
 # proxy you control are safe to trust. This is how many of those proxies sit in
 # front of Django. One reverse proxy (Caddy or nginx) that appends a single entry
 # means 1; a CDN in front of that proxy means 2.
-ATTACK_BAN_PROXY_HOPS = int(os.environ.get("ATTACK_BAN_PROXY_HOPS", 1))
+ATTACK_BAN_PROXY_HOPS = env_int("ATTACK_BAN_PROXY_HOPS", 1)
 
 # Log detected payloads without banning. On by default in DEBUG so a local test
 # cannot lock the developer out of their own machine; set ATTACK_BAN_DRY_RUN=1 to
@@ -188,7 +191,7 @@ CSRF_COOKIE_SECURE = env_bool("CSRF_COOKIE_SECURE", False)
 CSRF_TRUSTED_ORIGINS = [NEWSBLUR_URL]
 CSRF_FAILURE_VIEW = "apps.profile.csrf.csrf_failure"
 
-EMAIL_BACKEND = os.environ.get("EMAIL_BACKEND", "django.core.mail.backends.console.EmailBackend")
+EMAIL_BACKEND = os.environ.get("EMAIL_BACKEND") or "django.core.mail.backends.console.EmailBackend"
 EMAIL_HOST = os.environ.get("EMAIL_HOST", "")
 EMAIL_PORT = env_int("EMAIL_PORT", 25)
 EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER", "")

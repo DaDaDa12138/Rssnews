@@ -1,0 +1,144 @@
+# Personal-edition NewsBlur stack.
+#
+# Four containers: the reader (gunicorn plus the Celery worker and beat in the same
+# container, see newsblur_web/supervisor.py) with Postgres and Redis behind it, plus
+# the DLX translation sidecar. Django serves /static/ and /media/ itself, so there is
+# no web server in front.
+#
+# Reach the app at http://<lan-ip>:8080. Nothing else is published.
+
+# Docker keeps container logs as plain json files and, without a limit, grows them
+# forever. Celery logs every task at INFO, so cap them instead.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  newsblur_web:
+    hostname: nb.com
+    container_name: newsblur_web
+    image: newsblur/newsblur_python3:latest
+    build:
+      context: .
+      dockerfile: docker/newsblur_base_image.Dockerfile
+    # Run as the host user so files Django writes into the bind-mounted repo
+    # (logs, static) stay owned by your host user.
+    user: "${CURRENT_UID:-1000}:${CURRENT_GID:-1000}"
+    environment:
+      - DOCKERBUILD=True
+      - NEWSBLUR_URL=${NEWSBLUR_URL:-http://localhost:8080}
+      # Boots with the personal-edition settings by default. Point this at
+      # newsblur_web.settings_production (and set SECRET_KEY / ALLOWED_HOSTS) to run
+      # the production posture described in docs/DEPLOYMENT.md.
+      - DJANGO_SETTINGS_MODULE=${DJANGO_SETTINGS_MODULE:-newsblur_web.settings}
+      # glibc gives every thread its own malloc arena and rarely hands the pages
+      # back, so a threaded gunicorn plus the Celery pool ends up holding dozens
+      # of arenas. Two arenas keep the resident set flat without hurting anything.
+      - MALLOC_ARENA_MAX=2
+      # One-click translation. The sidecar speaks the DeepLX wire format, so a
+      # different endpoint only has to accept POST {text, source_lang, target_lang}.
+      - TRANSLATE_ENABLED=${TRANSLATE_ENABLED:-True}
+      - TRANSLATE_ENDPOINT=${TRANSLATE_ENDPOINT:-http://newsblur_deeplx:1188/translate}
+      - TRANSLATE_TOKEN=${TRANSLATE_TOKEN:-}
+      - TRANSLATE_TARGET_LANG=${TRANSLATE_TARGET_LANG:-ZH}
+      # Production posture (docs/DEPLOYMENT.md). Empty SECRET_KEY keeps the dev
+      # default, which only works while DEBUG is on; settings_production refuses
+      # to boot without both SECRET_KEY and ALLOWED_HOSTS.
+      - SECRET_KEY=${SECRET_KEY:-}
+      - ALLOWED_HOSTS=${ALLOWED_HOSTS:-}
+      - CSRF_TRUSTED_ORIGINS=${CSRF_TRUSTED_ORIGINS:-}
+      - ATTACK_BAN_PROXY_HOPS=${ATTACK_BAN_PROXY_HOPS:-1}
+      # Mail. The console backend prints password-reset links to the container log.
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-admin@localhost}
+      - SERVER_EMAIL=${SERVER_EMAIL:-newsblur@localhost}
+      - EMAIL_BACKEND=${EMAIL_BACKEND:-django.core.mail.backends.console.EmailBackend}
+      - EMAIL_HOST=${EMAIL_HOST:-}
+      - EMAIL_PORT=${EMAIL_PORT:-25}
+      - EMAIL_HOST_USER=${EMAIL_HOST_USER:-}
+      - EMAIL_HOST_PASSWORD=${EMAIL_HOST_PASSWORD:-}
+      - EMAIL_USE_TLS=${EMAIL_USE_TLS:-False}
+      # Process tuning; see config/gunicorn_conf.py and newsblur_web/supervisor.py.
+      - GUNICORN_WORKERS=${GUNICORN_WORKERS:-1}
+      - GUNICORN_THREADS=${GUNICORN_THREADS:-16}
+      - CELERY_WORKER_MEMORY_LIMIT_MB=${CELERY_WORKER_MEMORY_LIMIT_MB:-750}
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      - newsblur_db_postgres
+      - newsblur_db_redis
+      - newsblur_deeplx
+    ulimits:
+      nproc: 10000
+      nofile:
+        soft: 10000
+        hard: 10000
+    entrypoint: /bin/sh -c newsblur_web/entrypoint.sh
+    ports:
+      # The one and only published port: http://<host>:8080 -> gunicorn:8000.
+      # Override with NEWSBLUR_PORT in .env when 8080 is taken.
+      - ${NEWSBLUR_PORT:-8080}:8000
+    volumes:
+      - ${PWD}:/srv/newsblur
+
+  newsblur_db_postgres:
+    container_name: newsblur_db_postgres
+    image: postgres:18
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      - POSTGRES_USER=newsblur
+      - POSTGRES_PASSWORD=newsblur
+      # Pinned explicitly: postgres:18 moved the image default under
+      # /var/lib/postgresql/18/docker, and the bind mount below is what the
+      # backups and the rest of this file assume.
+      - PGDATA=/var/lib/postgresql/data
+    ports:
+      # Loopback only: nothing but the reader needs the database, and a published
+      # port on 0.0.0.0 hands the whole LAN a password guess at the only store of
+      # reading history. Reach it over ssh -L 5434:127.0.0.1:5434 if you need psql.
+      - 127.0.0.1:${POSTGRES_HOST_PORT:-5434}:5432
+    volumes:
+      - ./docker/volumes/postgres:/var/lib/postgresql/data
+
+  newsblur_db_redis:
+    container_name: newsblur_db_redis
+    image: redis:8.0
+    restart: unless-stopped
+    logging: *default-logging
+    ports:
+      # Loopback only. Redis runs without a password (docker/redis/redis.conf sets
+      # protected-mode no), so a 0.0.0.0 publish would let anyone on the LAN flush
+      # the fetch queue and every session.
+      - 127.0.0.1:${REDIS_HOST_PORT:-6579}:6579
+    volumes:
+      - ./docker/redis/redis.conf:/etc/redis/redis.conf:ro
+      - ./docker/volumes/redis:/data
+    command: redis-server /etc/redis/redis.conf --port 6579
+
+  # Translation sidecar: a Go client for the DeepL web endpoint, speaking the DeepLX
+  # wire format (POST /translate with {text, source_lang, target_lang}). It talks to
+  # the internet, not to Postgres or Redis, and publishes no port: only the reader
+  # container reaches it, over the compose network.
+  newsblur_deeplx:
+    container_name: newsblur_deeplx
+    image: ghcr.io/owo-network/deeplx:latest
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      # Optional shared secret. Empty keeps the endpoint open, which is fine here
+      # because nothing outside the compose network can reach it.
+      - TOKEN=${TRANSLATE_TOKEN:-}
+    # The binary idles at a few dozen megabytes; the cap only stops a runaway.
+    mem_limit: 192m
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:1188/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

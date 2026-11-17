@@ -1,0 +1,5797 @@
+"""RSS feed and story models: Feed (PostgreSQL), MStory (MongoDB), and feed page/icon storage.
+
+Feed stores feed metadata and scheduling in PostgreSQL. MStory stores story
+content in MongoDB. Additional models handle feed pages, favicons, fetch
+history, and duplicate feed detection.
+"""
+
+import base64
+import contextlib
+import calendar
+import datetime
+import difflib
+import hashlib
+import html as html_module
+import math
+import random
+import re
+import threading
+import time
+import urllib.parse
+import zlib
+from collections import Counter, defaultdict
+
+import redis
+import requests
+from bs4 import BeautifulSoup
+from django.conf import settings
+from django.contrib.auth.models import User
+from django.contrib.postgres.indexes import GinIndex
+from django.db import IntegrityError, models, transaction
+from django.db.models.query import QuerySet
+from django.db.utils import DatabaseError
+from django.template.defaultfilters import slugify
+from django.urls import reverse
+from django.utils.encoding import DjangoUnicodeDecodeError, smart_bytes, smart_str
+from django.core.exceptions import ValidationError
+from django.db.models import Case, Count, F, IntegerField, Q, Sum, When
+from django.db.models.functions import Abs, ExtractHour, ExtractMonth, ExtractWeekDay, ExtractYear, Upper
+from redis.exceptions import LockError
+
+from apps.rss_feeds.scheduling import phase_offset_minutes
+from apps.rss_feeds.tasks import (
+    MergeFeeds,
+    ScheduleCountTagsForUser,
+    UpdateFeeds,
+)
+from apps.rss_feeds.text_importer import (
+    TextImporter,
+    is_google_consent_text,
+    is_google_news_url,
+)
+from utils import feedfinder_forman, feedfinder_pilgrim
+from utils.documents import LegacyDocument, NotUniqueError, OperationError
+from utils import json_functions as json
+from utils import log as logging
+from utils import urlnorm
+from utils.analytics_degradation import skip_when_analytics_down
+from utils.feed_functions import (
+    TimeoutError,
+    is_openrss_feed_address,
+    is_youtube_feed_address,
+    levenshtein_distance,
+    relative_timesince,
+    rewrite_openrss_to_feed_address,
+    seconds_timesince,
+    strip_underscore_from_feed_address,
+    timelimit,
+)
+from utils.fields import AutoOneToOneField
+from utils.story_functions import (
+    create_imageproxy_signed_url,
+    htmldiff,
+    strip_comments,
+    strip_comments__lxml,
+    strip_tags,
+)
+from utils.url_safety import UnsafeUrlError, safe_requests_get, validate_public_url
+from vendor.timezones.utilities import localtime_for_timezone
+
+ENTRY_NEW, ENTRY_UPDATED, ENTRY_SAME, ENTRY_ERR = list(range(4))
+# Mongo rejects any document over 16MB, and a single story carries up to five of these
+# text blobs, so no one of them may exceed 2MB. A multi-megabyte story is broken scraped
+# content and not an article, so cutting it down is safe. apps/rss_feeds/models.py
+MAX_STORY_CONTENT_BYTES = 2 * 1024 * 1024
+# Plain text is what search indexes. A story body can be 2MB of HTML, but a
+# trigram index over that much text per story is far larger than the reader
+# needs; 200k characters covers long-form articles while keeping the GIN index
+# bounded. apps/rss_feeds/models.py
+MAX_STORY_SEARCH_TEXT_CHARS = 200_000
+# Each image URL used to be a mongoengine StringField(max_length=1024); the column is a JSON
+# list now, so the per-URL cap lives here (apps/rss_feeds/models.py).
+IMAGE_URL_MAX_LENGTH = 1024
+# Feed.task_feeds marks and publishes feeds this many at a time, which caps how many feeds a
+# failed publish can leave counted as tasked without a fetch. apps/rss_feeds/models.py
+TASK_FEEDS_CHUNK_SIZE = 100
+# Feed.story_retention never keeps fewer stories than this (its no-reads cap), so a feed holding
+# no more than this has nothing to trim. apps/rss_feeds/models.py
+FEWEST_STORIES_KEPT = 10
+
+
+def truncate_story_content(content_bytes, max_bytes=MAX_STORY_CONTENT_BYTES):
+    """
+    Cut UTF-8 encoded `content_bytes` down to at most `max_bytes` and decode it.
+
+    The character straddling the cut is kept whole rather than left half-encoded, so
+    the result can run a byte or two short of the cap. apps/rss_feeds/models.py
+    """
+    if len(content_bytes) <= max_bytes:
+        return smart_str(content_bytes)
+
+    truncated_bytes = content_bytes[:max_bytes]
+    try:
+        return truncated_bytes.decode("utf-8")
+    except UnicodeDecodeError as error:
+        boundary_end = max_bytes
+        while boundary_end < len(content_bytes) and content_bytes[boundary_end] & 0xC0 == 0x80:
+            boundary_end += 1
+        boundary_character = content_bytes[error.start : boundary_end]
+        prefix_bytes = content_bytes[: max_bytes - len(boundary_character)]
+
+        return prefix_bytes.decode("utf-8", errors="ignore") + boundary_character.decode("utf-8")
+
+
+def story_text_for_search(content):
+    """Plain text for the story search column, without markup or repeated whitespace.
+
+    Search uses substring matching, so HTML tags would otherwise hide words that
+    are split across markup and make ``body:`` miss text a reader can see. The
+    column is capped to keep the trigram index bounded; 200k characters is far
+    beyond a normal article. apps/rss_feeds/models.py
+    """
+    if not content:
+        return ""
+    text = html_module.unescape(strip_tags(smart_str(content)))
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:MAX_STORY_SEARCH_TEXT_CHARS]
+
+
+class Feed(models.Model):
+    feed_address = models.URLField(max_length=764, db_index=True)
+    feed_address_locked = models.BooleanField(default=False, blank=True, null=True)
+    feed_link = models.URLField(max_length=1000, default="", blank=True, null=True)
+    feed_link_locked = models.BooleanField(default=False)
+    hash_address_and_link = models.CharField(max_length=64, unique=True)
+    feed_title = models.CharField(max_length=255, default="[Untitled]", blank=True, null=True)
+    is_push = models.BooleanField(default=False, blank=True, null=True)
+    active = models.BooleanField(default=True, db_index=True)
+    num_subscribers = models.IntegerField(default=-1)
+    active_subscribers = models.IntegerField(default=-1, db_index=True)
+    premium_subscribers = models.IntegerField(default=-1)
+    archive_subscribers = models.IntegerField(default=0, null=True, blank=True)
+    pro_subscribers = models.IntegerField(default=0, null=True, blank=True)
+    active_premium_subscribers = models.IntegerField(default=-1)
+    # PROTECT, not CASCADE: deleting a feed must never delete the feeds branched from it.
+    # With CASCADE, merge_feeds deleting a stale parent took its live https branches and
+    # every subscription on them (forum #13830). Not SET_NULL either: a null parent is what
+    # marks a feed as public in discovery (apps/discover/views.py), and a branch can be a
+    # reader's private URL. A parent with branches must be merged (merge_feeds re-parents
+    # them) rather than deleted outright. apps/rss_feeds/models.py
+    branch_from_feed = models.ForeignKey(
+        "Feed", blank=True, null=True, db_index=True, on_delete=models.PROTECT
+    )
+    last_update = models.DateTimeField(db_index=True)
+    next_scheduled_update = models.DateTimeField()
+    last_story_date = models.DateTimeField(null=True, blank=True)
+    fetched_once = models.BooleanField(default=False)
+    known_good = models.BooleanField(default=False)
+    has_feed_exception = models.BooleanField(default=False, db_index=True)
+    has_page_exception = models.BooleanField(default=False, db_index=True)
+    has_page = models.BooleanField(default=True)
+    exception_code = models.IntegerField(default=0)
+    errors_since_good = models.IntegerField(default=0)
+    min_to_decay = models.IntegerField(default=0)
+    # Minutes between fetches chosen by the reader for this feed. Empty means
+    # follow the reader-wide preference (see get_configured_fetch_interval).
+    fetch_interval = models.PositiveSmallIntegerField(null=True, blank=True)
+    days_to_trim = models.IntegerField(default=90)
+    creation = models.DateField(auto_now_add=True)
+    etag = models.CharField(max_length=255, blank=True, null=True)
+    last_modified = models.DateTimeField(null=True, blank=True)
+    stories_last_month = models.IntegerField(default=0)
+    average_stories_per_month = models.IntegerField(default=0)
+    last_load_time = models.IntegerField(default=0)
+    favicon_color = models.CharField(max_length=6, null=True, blank=True)
+    favicon_not_found = models.BooleanField(default=False)
+    s3_page = models.BooleanField(default=False, blank=True, null=True)
+    s3_icon = models.BooleanField(default=False, blank=True, null=True)
+    search_indexed = models.BooleanField(default=None, null=True, blank=True)
+    discover_indexed = models.BooleanField(default=None, null=True, blank=True)
+    fs_size_bytes = models.BigIntegerField(null=True, blank=True)
+    archive_count = models.IntegerField(null=True, blank=True)
+    similar_feeds = models.ManyToManyField(
+        "self", related_name="feeds_by_similarity", symmetrical=False, blank=True
+    )
+    is_forbidden = models.BooleanField(blank=True, null=True)
+    date_forbidden = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        db_table = "feeds"
+        ordering = ["feed_title"]
+        indexes = [
+            models.Index(fields=["is_forbidden"], name="feeds_is_forbidden_idx"),
+        ]
+        # unique_together=[('feed_address', 'feed_link')]
+
+    def __str__(self):
+        if not self.feed_title:
+            self.feed_title = "[Untitled]"
+            self.save()
+        return "%s%s: %s - %s/%s/%s/%s/%s %s stories (%s bytes)" % (
+            self.pk,
+            (" [B: %s]" % self.branch_from_feed.pk if self.branch_from_feed else ""),
+            self.feed_title,
+            self.num_subscribers,
+            self.active_subscribers,
+            self.active_premium_subscribers,
+            self.archive_subscribers,
+            self.pro_subscribers,
+            self.archive_count,
+            self.fs_size_bytes,
+        )
+
+    @property
+    def title(self):
+        title = self.feed_title or "[Untitled]"
+        if self.active_premium_subscribers >= 1:
+            title = "%s*" % title[:29]
+        return title
+
+    @property
+    def log_title(self):
+        return self.__str__()
+
+    @property
+    def permalink(self):
+        return "%s/site/%s/%s" % (settings.NEWSBLUR_URL, self.pk, slugify(self.feed_title.lower()[:50]))
+
+    @property
+    def favicon_url(self):
+        return reverse("feed-favicon", kwargs={"feed_id": self.pk})
+
+    @property
+    def s3_pages_key(self):
+        return "%s.gz.html" % self.pk
+
+    @property
+    def unread_cutoff(self):
+        if self.archive_subscribers and self.archive_subscribers > 0:
+            return datetime.datetime.utcnow() - datetime.timedelta(days=settings.DAYS_OF_UNREAD_ARCHIVE)
+        if self.premium_subscribers > 0:
+            return datetime.datetime.utcnow() - datetime.timedelta(days=settings.DAYS_OF_UNREAD)
+
+        return datetime.datetime.utcnow() - datetime.timedelta(days=settings.DAYS_OF_UNREAD_FREE)
+
+    @classmethod
+    def days_of_story_hashes_for_feed(cls, feed_id):
+        try:
+            feed = cls.objects.only("archive_subscribers").get(pk=feed_id)
+            return feed.days_of_story_hashes
+        except cls.DoesNotExist:
+            return settings.DAYS_OF_STORY_HASHES
+
+    @property
+    def days_of_story_hashes(self):
+        if self.archive_subscribers and self.archive_subscribers > 0:
+            return settings.DAYS_OF_STORY_HASHES_ARCHIVE
+        return settings.DAYS_OF_STORY_HASHES
+
+    @property
+    def story_hashes_in_unread_cutoff(self):
+        r = redis.Redis(connection_pool=settings.REDIS_STORY_HASH_POOL)
+        current_time = int(time.time() + 60 * 60 * 24)
+        unread_cutoff = self.unread_cutoff.strftime("%s")
+        story_hashes = r.zrevrangebyscore("zF:%s" % self.pk, current_time, unread_cutoff)
+
+        return story_hashes
+
+    @classmethod
+    def generate_hash_address_and_link(cls, feed_address, feed_link):
+        if not feed_address:
+            feed_address = ""
+        if not feed_link:
+            feed_link = ""
+        return hashlib.sha1((feed_address + feed_link).encode(encoding="utf-8")).hexdigest()
+
+    @property
+    def is_newsletter(self):
+        return self.feed_address.startswith("newsletter:") or self.feed_address.startswith(
+            "http://newsletter:"
+        )
+
+    @property
+    def is_webfeed(self):
+        return self.feed_address.startswith("webfeed:")
+
+    @property
+    def is_google_news_feed(self):
+        return "news.google.com" in self.feed_address
+
+    @property
+    def is_private_branch(self):
+        """A feed branched from another is a reader's own copy and can carry a personal URL
+        (an access token in the address, a private page as the link), so logs name it by id
+        and the merge inventory keeps its address out of the task log.
+        apps/rss_feeds/models.py"""
+        return bool(self.branch_from_feed_id)
+
+    @property
+    def loggable_address(self):
+        return "private feed %s address" % self.pk if self.is_private_branch else self.feed_address
+
+    @property
+    def loggable_link(self):
+        return "private feed %s link" % self.pk if self.is_private_branch else self.feed_link
+
+    @property
+    def is_bluesky_feed(self):
+        return "bsky.app/profile/" in self.feed_address
+
+    def canonical(self, full=False, include_favicon=True):
+        feed = {
+            "id": self.pk,
+            "feed_title": self.feed_title,
+            "feed_address": self.feed_address,
+            "feed_link": self.feed_link,
+            "num_subscribers": self.num_subscribers,
+            "updated": relative_timesince(self.last_update),
+            "updated_seconds_ago": seconds_timesince(self.last_update),
+            "fs_size_bytes": self.fs_size_bytes,
+            "archive_count": self.archive_count,
+            "last_story_date": self.last_story_date.isoformat() if self.last_story_date else None,
+            "last_story_seconds_ago": seconds_timesince(self.last_story_date),
+            "stories_last_month": self.stories_last_month,
+            "average_stories_per_month": self.average_stories_per_month,
+            "min_to_decay": self.min_to_decay,
+            "fetch_interval": self.fetch_interval,
+            "subs": self.num_subscribers,
+            "is_push": self.is_push,
+            "is_newsletter": self.is_newsletter,
+            "is_webfeed": self.is_webfeed,
+            "fetched_once": self.fetched_once,
+            "not_yet_fetched": not self.fetched_once,  # Legacy. Doh.
+            "favicon_color": self.favicon_color,
+            "favicon_fade": self.favicon_fade(),
+            "favicon_border": self.favicon_border(),
+            "favicon_text_color": self.favicon_text_color(),
+            "favicon_fetching": self.favicon_fetching,
+            "favicon_url": self.favicon_url,
+            "s3_page": self.s3_page,
+            "s3_icon": self.s3_icon,
+            "disabled_page": not self.has_page,
+            # .all() rather than .values("pk") so a caller that prefetched
+            # similar_feeds gets the cached rows instead of one query per feed.
+            "similar_feeds": [f.pk for f in self.similar_feeds.all()],
+        }
+
+        if include_favicon:
+            try:
+                feed_icon = MFeedIcon.objects.get(feed_id=self.pk)
+                feed["favicon"] = feed_icon.data
+            except MFeedIcon.DoesNotExist:
+                pass
+        if self.has_page_exception or self.has_feed_exception:
+            feed["has_exception"] = True
+            feed["exception_type"] = "feed" if self.has_feed_exception else "page"
+            feed["exception_code"] = self.exception_code
+        elif full:
+            feed["has_exception"] = False
+            feed["exception_type"] = None
+            feed["exception_code"] = self.exception_code
+
+        if full:
+            feed["average_stories_per_month"] = self.average_stories_per_month
+            feed["tagline"] = self.data.feed_tagline
+            feed["feed_tags"] = json.decode(self.data.popular_tags) if self.data.popular_tags else []
+            feed["feed_authors"] = json.decode(self.data.popular_authors) if self.data.popular_authors else []
+
+        return feed
+
+    def save(self, *args, **kwargs):
+        if kwargs.get("force_update") and not self.pk:
+            logging.debug(" ---> ~FRFeed.save(force_update=True) with no pk, skipping")
+            return
+        if not self.last_update:
+            self.last_update = datetime.datetime.utcnow()
+        if not self.next_scheduled_update:
+            self.next_scheduled_update = datetime.datetime.utcnow()
+        self.fix_google_alerts_urls()
+
+        feed_address = self.feed_address or ""
+        feed_link = self.feed_link or ""
+        self.hash_address_and_link = self.generate_hash_address_and_link(feed_address, feed_link)
+
+        max_feed_title = Feed._meta.get_field("feed_title").max_length
+        if len(self.feed_title) > max_feed_title:
+            self.feed_title = self.feed_title[:max_feed_title]
+        max_feed_address = Feed._meta.get_field("feed_address").max_length
+        if len(feed_address) > max_feed_address:
+            self.feed_address = feed_address[:max_feed_address]
+        max_feed_link = Feed._meta.get_field("feed_link").max_length
+        if len(feed_link) > max_feed_link:
+            self.feed_link = feed_link[:max_feed_link]
+
+        parking_hash = None
+        try:
+            # The parking-marker lookup and the row write are one transaction, and the lookup
+            # locks the row: restore_merged_feed's parking UPDATE waits for a save that read
+            # the row before the marker was there, and a save that starts after the marker is
+            # committed sees it. Either way the marker survives the save.
+            with transaction.atomic():
+                exists, parking_hash, parked_parent_id = self.row_on_disk(kwargs.get("update_fields"))
+                if not exists:
+                    # The row went away while this instance was held: a merge folded the feed
+                    # into another one (restore_merged_feed folding in a parked feed, say). A
+                    # plain save would insert the deleted id again, and the next fetch would
+                    # find that row instead of the survivor and write stories to a feed whose
+                    # readers have moved on. Follow the merge's redirect instead.
+                    survivor = Feed.get_by_id(self.pk)
+                    logging.debug(
+                        " ***> Feed %s was deleted while a save was pending, %s"
+                        % (
+                            self.pk,
+                            "following its redirect to %s" % survivor.pk if survivor else "no redirect",
+                        )
+                    )
+                    return survivor
+                if parking_hash:
+                    # restore_merged_feed parked this row while it brings the original feed
+                    # back. The marker stays through every save, an address change included
+                    # (a redirect or the Open RSS migration the fetcher saves from outside the
+                    # merge lock): recomputed from a new address nobody holds, the hash would
+                    # save cleanly and the fold-in would delete this feed's stories instead of
+                    # moving them. The row is folded into its restore target below.
+                    self.hash_address_and_link = parking_hash
+                    # The parent restore_merged_feed gave the parked copy is what keeps its
+                    # address out of the merge logs; an instance loaded before the parking
+                    # still carries the old (empty) one and must not write it back.
+                    self.branch_from_feed_id = parked_parent_id
+                    self._state.fields_cache.pop("branch_from_feed", None)
+                super(Feed, self).save(*args, **kwargs)
+        except IntegrityError as e:
+            logging.debug(" ---> ~FRFeed save collision (%s), checking dupe hash..." % e)
+            feed_address = self.feed_address or ""
+            feed_link = self.feed_link or ""
+            hash_address_and_link = self.generate_hash_address_and_link(feed_address, feed_link)
+            logging.debug(" ---> ~FRNo dupes, checking hash collision: %s" % hash_address_and_link)
+            duplicate_feeds = Feed.objects.filter(hash_address_and_link=hash_address_and_link)
+
+            if not duplicate_feeds:
+                duplicate_feeds = Feed.objects.filter(
+                    feed_address=self.feed_address, feed_link=self.feed_link
+                )
+            if not duplicate_feeds:
+                # Feed has been deleted. Just ignore it.
+                logging.debug(
+                    " ***> Changed to: %s - %s: %s" % (self.feed_address, self.feed_link, duplicate_feeds)
+                )
+                logging.debug(" ***> [%-30s] Feed deleted (%s)." % (self.log_title[:30], self.pk))
+                return
+
+            for duplicate_feed in duplicate_feeds:
+                if duplicate_feed.pk != self.pk:
+                    logging.debug(
+                        " ---> ~FRFound different feed (%s), merging %s in..." % (duplicate_feeds[0], self.pk)
+                    )
+                    feed = Feed.get_by_id(merge_feeds(duplicate_feeds[0].pk, self.pk))
+                    return feed
+            else:
+                logging.debug(" ---> ~FRFeed is its own dupe? %s == %s" % (self, duplicate_feeds))
+        except DatabaseError as e:
+            logging.debug(
+                " ---> ~FBFeed update failed, no change: %s / %s..." % (kwargs.get("update_fields", None), e)
+            )
+
+        if parking_hash:
+            return self.fold_parked_feed_into_its_restore_target(parking_hash)
+
+        return self
+
+    def row_on_disk(self, update_fields=None):
+        """Whether this feed's row still exists (True as well for a new instance that is
+        about to be inserted), the restore-parked- placeholder it carries while
+        restore_merged_feed brings the original feed back (or None), and the parent stored
+        with that placeholder. Only
+        looked up by a save that would write the hash column, since one with update_fields
+        leaves it alone and fails harmlessly on a missing row. Locks the row for the rest of
+        the save's transaction, whether or not it is parked, so a parking UPDATE cannot slip
+        in between this lookup and the write. apps/rss_feeds/models.py"""
+        if not self.pk or (update_fields is not None and "hash_address_and_link" not in update_fields):
+            return True, None, None
+        rows = list(
+            Feed.objects.select_for_update()
+            .filter(pk=self.pk)
+            .values_list("hash_address_and_link", "branch_from_feed_id")
+        )
+        if not rows:
+            # A new instance built with a chosen id (fixtures do this) is meant to be
+            # inserted; only a row this instance was loaded from can have vanished.
+            return self._state.adding, None, None
+        stored_hash, stored_parent_id = rows[0]
+        if stored_hash and stored_hash.startswith(RESTORE_PARKED_HASH_PREFIX):
+            return True, stored_hash, stored_parent_id
+        return True, None, None
+
+    def fold_parked_feed_into_its_restore_target(self, parking_hash):
+        """After a save of a parked row: fold it into the feed restore_merged_feed parked it
+        for, named in the marker (restore-parked-<this id>-for-<target id>), the way the
+        collision on the target's hash used to. The target is what this row's readers
+        subscribed to, whatever address the row has redirected to since, so the holder of
+        its current address is never the destination. When the target row is not there (a
+        restore interrupted before it was recreated) the row stays parked for the rerun,
+        which finds it by the same marker. apps/rss_feeds/models.py"""
+        target_id = restore_target_from_parking_hash(parking_hash)
+        if target_id and Feed.objects.filter(pk=target_id).exists():
+            logging.debug(
+                " ---> ~FRParked feed %s saved, folding it into restored feed %s..." % (self.pk, target_id)
+            )
+            return Feed.get_by_id(merge_feeds(target_id, self.pk))
+        logging.debug(
+            " ---> ~FRParked feed %s saved but restored feed %s is not back yet, leaving it parked"
+            % (self.pk, target_id)
+        )
+        return self
+
+    @classmethod
+    def feed_holding_address(cls, feed_address, feed_link, exclude_ids=()):
+        """The feed a save with this address and link collides with, looked up the way
+        Feed.save does on its IntegrityError: the holder of the canonical hash first, and only
+        when no row has it a feed carrying the exact address and link under a stale hash (a
+        save with update_fields does not recompute the hash). Parking or merging the stale
+        twin while another row still owns the hash would leave the collision in place.
+        apps/rss_feeds/models.py"""
+        holders = cls.feeds_holding_address(feed_address, feed_link, exclude_ids=exclude_ids)
+        return holders[0] if holders else None
+
+    @classmethod
+    def feeds_holding_address(cls, feed_address, feed_link, exclude_ids=()):
+        """Every feed a save with this address and link would collide with, the holder of the
+        canonical hash first and then the feeds carrying the exact address and link under a
+        stale hash, by id. A restore parks and folds in all of them: a stale twin left at
+        the restored address would collide with the restored feed on its own next full save
+        and, with more readers, merge the restored feed away. apps/rss_feeds/models.py"""
+        canonical_hash = cls.generate_hash_address_and_link(feed_address or "", feed_link or "")
+        by_hash = list(
+            cls.objects.filter(hash_address_and_link=canonical_hash)
+            .exclude(pk__in=exclude_ids)
+            .order_by("pk")
+        )
+        seen = [feed.pk for feed in by_hash] + list(exclude_ids)
+        by_address = list(
+            cls.objects.filter(feed_address=feed_address, feed_link=feed_link)
+            .exclude(pk__in=seen)
+            .order_by("pk")
+        )
+        return by_hash + by_address
+
+    def sync_redis(self, allow_skip_resync=False):
+        return MStory.sync_feed_redis(self.pk, allow_skip_resync=allow_skip_resync)
+
+    def expire_redis(self, r=None):
+        if not r:
+            r = redis.Redis(connection_pool=settings.REDIS_STORY_HASH_POOL)
+
+        r.expire("F:%s" % self.pk, self.days_of_story_hashes * 24 * 60 * 60)
+        r.expire("zF:%s" % self.pk, self.days_of_story_hashes * 24 * 60 * 60)
+
+    @classmethod
+    def low_volume_feeds(cls, feed_ids, stories_per_month=30):
+        try:
+            stories_per_month = int(stories_per_month)
+        except ValueError:
+            stories_per_month = 30
+        feeds = (
+            Feed.objects.filter(pk__in=feed_ids, average_stories_per_month__lte=stories_per_month)
+            .only("pk")
+        )
+
+        return [f.pk for f in feeds]
+
+    @classmethod
+    def autocomplete(cls, prefix, limit=10):
+        # Personal edition: plain substring match on title or address, no search cluster.
+        feeds = cls.objects.filter(
+            models.Q(feed_title__icontains=prefix) | models.Q(feed_address__icontains=prefix)
+        ).order_by("-num_subscribers")
+        return list(feeds.values_list("pk", flat=True)[:limit])
+
+    @classmethod
+    def find_or_create(cls, feed_address, feed_link, defaults=None, **kwargs):
+        feeds = cls.objects.filter(feed_address=feed_address, feed_link=feed_link)
+        if feeds:
+            return feeds[0], False
+
+        if feed_link and feed_link.endswith("/"):
+            feeds = cls.objects.filter(feed_address=feed_address, feed_link=feed_link[:-1])
+            if feeds:
+                return feeds[0], False
+
+        try:
+            feed = cls.objects.get(feed_address=feed_address, feed_link=feed_link)
+            return feed, False
+        except cls.DoesNotExist:
+            feed = cls(**defaults)
+            feed = feed.save()
+            return feed, True
+
+    @classmethod
+    def merge_feeds(cls, *args, **kwargs):
+        return merge_feeds(*args, **kwargs)
+
+    def fix_google_alerts_urls(self):
+        if self.feed_address.startswith("http://user/") and "/state/com.google/alerts/" in self.feed_address:
+            match = re.match(r"http://user/(\d+)/state/com.google/alerts/(\d+)", self.feed_address)
+            if match:
+                user_id, alert_id = match.groups()
+                self.feed_address = "http://www.google.com/alerts/feeds/%s/%s" % (user_id, alert_id)
+
+    def set_is_forbidden(self):
+        self.is_forbidden = True
+        self.date_forbidden = datetime.datetime.now()
+
+        return self.save()
+
+    @classmethod
+    def schedule_feed_fetches_immediately(cls, feed_ids, user_id=None):
+        if settings.DEBUG:
+            logging.info(
+                " ---> ~SN~FMSkipping the scheduling immediate fetch of ~SB%s~SN feeds (in DEBUG)..."
+                % len(feed_ids)
+            )
+            return
+
+        if user_id:
+            user = User.objects.get(pk=user_id)
+            logging.user(user, "~SN~FMScheduling immediate fetch of ~SB%s~SN feeds..." % len(feed_ids))
+        else:
+            logging.debug(" ---> ~SN~FMScheduling immediate fetch of ~SB%s~SN feeds..." % len(feed_ids))
+
+        if len(feed_ids) > 100:
+            logging.debug(" ---> ~SN~FMFeeds scheduled: %s" % feed_ids)
+        day_ago = datetime.datetime.now() - datetime.timedelta(days=1)
+        feeds = Feed.objects.filter(pk__in=feed_ids)
+        for feed in feeds:
+            if feed.active_subscribers <= 0:
+                feed.count_subscribers()
+            if not feed.active or feed.next_scheduled_update < day_ago:
+                feed.schedule_feed_fetch_immediately(verbose=False)
+
+    @property
+    def favicon_fetching(self):
+        return bool(not (self.favicon_not_found or self.favicon_color))
+
+    @classmethod
+    def get_feed_from_url(
+        cls,
+        url,
+        create=True,
+        aggressive=False,
+        fetch=True,
+        offset=0,
+        user=None,
+        interactive=False,
+        max_stories=None,
+    ):
+        feed = None
+        without_rss = False
+        original_url = url
+
+        if url and url.startswith("newsletter:"):
+            try:
+                return cls.objects.get(feed_address=url)
+            except cls.MultipleObjectsReturned:
+                return cls.objects.filter(feed_address=url)[0]
+        if url and url.startswith("webfeed:"):
+            try:
+                return cls.objects.get(feed_address=url)
+            except cls.MultipleObjectsReturned:
+                return cls.objects.filter(feed_address=url)[0]
+            except cls.DoesNotExist:
+                return None
+        if url and re.match(r"(https?://)?twitter.com/\w+/?", url):
+            without_rss = True
+        if url and re.match(r"(https?://)?(www\.)?facebook.com/\w+/?$", url):
+            without_rss = True
+        # Turn url @username@domain.com into domain.com/users/username.rss
+        if url and url.startswith("@") and "@" in url[1:]:
+            username, domain = url[1:].split("@")
+            url = f"https://{domain}/users/{username}.rss"
+        # Only rewrite when YouTube actually serves the URL. Privacy proxies like
+        # openrss.org embed the channel URL in their path, so guard on the host to
+        # avoid hijacking https://openrss.org/www.youtube.com/@user/videos.
+        if url and is_youtube_feed_address(url):
+            if "youtube.com/user/" in url:
+                username = re.search(r"youtube.com/user/(\w+)", url).group(1)
+                url = "http://gdata.youtube.com/feeds/base/users/%s/uploads" % username
+                without_rss = True
+            if "youtube.com/@" in url:
+                username = url.split("youtube.com/@")[1]
+                url = "http://gdata.youtube.com/feeds/base/users/%s/uploads" % username
+                without_rss = True
+            if "youtube.com/channel/" in url:
+                channel_id = re.search(r"youtube.com/channel/([-_\w]+)", url).group(1)
+                url = "https://www.youtube.com/feeds/videos.xml?channel_id=%s" % channel_id
+                without_rss = True
+            if "youtube.com/feeds" in url:
+                without_rss = True
+            if "youtube.com/playlist" in url:
+                without_rss = True
+        # Open RSS (openrss.org) proxies a site's feed under /feed/ and serves a
+        # human-readable preview at the bare path. Rewrite previews to the /feed/
+        # address so we never cache the preview page as the feed. Guarded on host
+        # like is_youtube_feed_address above. See utils/feed_functions.py.
+        openrss_preview_url = None
+        if url and is_openrss_feed_address(url):
+            rewritten = rewrite_openrss_to_feed_address(url)
+            if rewritten != url:
+                openrss_preview_url = url
+                url = rewritten
+                without_rss = True
+        if url and "reddit.com/r/" in url and url.endswith(".rss"):
+            without_rss = True
+        if url and "/wp-json/wp/v2/posts" in url:
+            if "_embed" not in url:
+                separator = "&" if "?" in url else "?"
+                url = f"{url}{separator}_embed=true"
+            without_rss = True
+
+        def criteria(key, value):
+            if aggressive:
+                return {"%s__icontains" % key: value}
+            else:
+                return {"%s" % key: value}
+
+        def by_url(address):
+            feed = (
+                cls.objects.filter(branch_from_feed=None)
+                .filter(**criteria("feed_address", address))
+                .order_by("-num_subscribers")
+            )
+            logging.debug(f" ---> Feeds found by address: {feed}")
+            if not feed:
+                duplicate_feed = DuplicateFeed.objects.filter(**criteria("duplicate_address", address))
+                if duplicate_feed and len(duplicate_feed) > offset:
+                    feed = [duplicate_feed[offset].feed]
+                logging.debug(
+                    f" ---> Feeds found by duplicate address: {duplicate_feed} {feed} (offset: {offset})"
+                )
+            if not feed and aggressive:
+                feed = (
+                    cls.objects.filter(branch_from_feed=None)
+                    .filter(**criteria("feed_link", address))
+                    .order_by("-num_subscribers")
+                )
+                logging.debug(f" ---> Feeds found by link: {feed}")
+
+            return feed
+
+        @timelimit(10)
+        def _feedfinder_forman(url):
+            found_feed_urls = feedfinder_forman.find_feeds(url)
+            logging.debug(f" ---> Feeds found by forman: {found_feed_urls}")
+            return found_feed_urls
+
+        @timelimit(10)
+        def _feedfinder_pilgrim(url):
+            found_feed_urls = feedfinder_pilgrim.feeds(url)
+            logging.debug(f" ---> Feeds found by pilgrim: {found_feed_urls}")
+            return found_feed_urls
+
+        # Normalize and check for feed_address, dupes, and feed_link
+        url = urlnorm.normalize(url)
+        if not url:
+            logging.debug(" ---> ~FRCouldn't normalize url: ~SB%s" % url)
+            return
+        try:
+            validate_public_url(url)
+        except UnsafeUrlError as e:
+            logging.debug(" ---> ~FRUnsafe feed URL rejected: ~SB%s~SN (%s)" % (url, e))
+            return
+
+        feed = by_url(url)
+        if not feed and openrss_preview_url:
+            # A pre-change feed may still be stored at the preview address; reuse it
+            # (it migrates to /feed/ on its next fetch) rather than create a duplicate.
+            feed = by_url(urlnorm.normalize(openrss_preview_url))
+        found_feed_urls = []
+
+        if interactive:
+            import pdb
+
+            pdb.set_trace()
+
+        # Create if it looks good
+        if feed and len(feed) > offset:
+            feed = feed[offset]
+        else:
+            try:
+                found_feed_urls = _feedfinder_forman(url)
+            except TimeoutError:
+                logging.debug("   ---> Feed finder timed out...")
+                found_feed_urls = []
+            if not found_feed_urls:
+                try:
+                    found_feed_urls = _feedfinder_pilgrim(url)
+                except TimeoutError:
+                    logging.debug("   ---> Feed finder old timed out...")
+                    found_feed_urls = []
+
+            if len(found_feed_urls):
+                feed_finder_url = found_feed_urls[0]
+                logging.debug(" ---> Found feed URLs for %s: %s" % (url, found_feed_urls))
+                feed = by_url(feed_finder_url)
+                if feed and len(feed) > offset:
+                    feed = feed[offset]
+                    logging.debug(" ---> Feed exists (%s), updating..." % (feed))
+                    feed = feed.update(max_stories=max_stories)
+                elif create:
+                    logging.debug(" ---> Feed doesn't exist, creating: %s" % (feed_finder_url))
+                    try:
+                        feed = cls.objects.create(feed_address=feed_finder_url)
+                        if not feed.pk:
+                            feed = by_url(feed_finder_url)
+                            feed = feed[offset] if feed and len(feed) > offset else None
+                        else:
+                            feed = feed.update(max_stories=max_stories)
+                    except IntegrityError:
+                        feed = by_url(feed_finder_url)
+                        feed = feed[offset] if feed and len(feed) > offset else None
+            elif without_rss:
+                logging.debug(" ---> Found without_rss feed: %s / %s" % (url, original_url))
+                try:
+                    feed = cls.objects.create(feed_address=url, feed_link=original_url)
+                    if not feed.pk:
+                        feed = by_url(url)
+                        feed = feed[offset] if feed and len(feed) > offset else None
+                    else:
+                        feed = feed.update(
+                            requesting_user_id=user.pk if user else None, max_stories=max_stories
+                        )
+                except IntegrityError:
+                    feed = by_url(url)
+                    feed = feed[offset] if feed and len(feed) > offset else None
+
+        # Check for JSON feed
+        if not feed and fetch and create:
+            try:
+                r = safe_requests_get(url, timeout=10)
+            except (UnsafeUrlError, requests.RequestException):
+                # RequestException covers everything a hostile or broken site can throw
+                # at a URL the user is trying to add (redirect loops, undecodable
+                # content-encoding, bad schemes, timeouts). None of it makes this a
+                # feed, so fall through and let the caller report "not a feed".
+                r = None
+            if r and "application/json" in (r.headers.get("Content-Type") or ""):
+                try:
+                    feed = cls.objects.create(feed_address=url)
+                    if not feed.pk:
+                        feed = by_url(url)
+                        feed = feed[offset] if feed and len(feed) > offset else None
+                    else:
+                        feed = feed.update(max_stories=max_stories)
+                except IntegrityError:
+                    feed = by_url(url)
+                    feed = feed[offset] if feed and len(feed) > offset else None
+
+        # Still nothing? Maybe the URL has some clues.
+        if not feed and fetch and len(found_feed_urls):
+            feed_finder_url = found_feed_urls[0]
+            feed = by_url(feed_finder_url)
+            if not feed and create:
+                try:
+                    feed = cls.objects.create(feed_address=feed_finder_url)
+                    if not feed.pk:
+                        feed = by_url(feed_finder_url)
+                        feed = feed[offset] if feed and len(feed) > offset else None
+                    else:
+                        feed = feed.update(max_stories=max_stories)
+                except IntegrityError:
+                    feed = by_url(feed_finder_url)
+                    feed = feed[offset] if feed and len(feed) > offset else None
+            elif feed and len(feed) > offset:
+                feed = feed[offset]
+
+        # Not created and not within bounds, so toss results.
+        if isinstance(feed, QuerySet):
+            logging.debug(" ---> ~FRNot created and not within bounds, tossing: ~SB%s" % feed)
+            return
+
+        return feed
+
+    @classmethod
+    def task_feeds(cls, feeds, queue_size=12, verbose=True):
+        if not feeds:
+            return
+        r = redis.Redis(connection_pool=settings.REDIS_FEED_UPDATE_POOL)
+
+        if isinstance(feeds, Feed):
+            if verbose:
+                logging.debug(" ---> ~SN~FBTasking feed: ~SB%s" % feeds)
+            feeds = [feeds.pk]
+        elif verbose:
+            logging.debug(" ---> ~SN~FBTasking ~SB~FC%s~FB~SN feeds..." % len(feeds))
+
+        if isinstance(feeds, QuerySet):
+            feeds = [f.pk for f in feeds]
+
+        # A feed leaves queued_feeds only after its fetch task is published. Publishing gives up
+        # after about a second of broker connection errors (newsblur_web/settings.py
+        # CELERY_BROKER_TRANSPORT_OPTIONS), and the broker shares its Redis with these keys, so
+        # nothing could put an unpublished feed back. A feed taken off the queue without a fetch
+        # waited for TaskBrokenFeeds, every 6 hours, and enough of them stopped TaskFeeds tasking.
+        # Feeds are marked tasked before their fetches go out, so a fetch that finishes first
+        # can't have its tasked entry written back after it; chunks keep a failed publish to at
+        # most TASK_FEEDS_CHUNK_SIZE feeds counted as tasked, all still queued to be tasked again.
+        for start in range(0, len(feeds), TASK_FEEDS_CHUNK_SIZE):
+            chunk = feeds[start : start + TASK_FEEDS_CHUNK_SIZE]
+            now = datetime.datetime.now().strftime("%s")
+            r.zadd("tasked_feeds", {feed_id: now for feed_id in chunk})
+            for feed_id in chunk:
+                UpdateFeeds.apply_async(args=(feed_id,), queue="update_feeds")
+            r.srem("queued_feeds", *chunk)
+
+    def update_all_statistics(self, has_new_stories=False, force=False, delay_fetch_sec=None):
+        recount = not self.counts_converted_to_redis
+        count_extra = False
+        if random.random() < 0.01 or not self.data.popular_tags or not self.data.popular_authors:
+            count_extra = True
+
+        self.count_subscribers(recount=recount)
+        self.calculate_last_story_date()
+
+        if force or has_new_stories or count_extra:
+            self.save_feed_stories_last_month()
+
+        if not self.fs_size_bytes or not self.archive_count:
+            self.count_fs_size_bytes()
+
+        if force or (has_new_stories and count_extra):
+            self.save_popular_authors()
+            self.save_popular_tags()
+            self.save_feed_story_history_statistics()
+
+        if force or count_extra:
+            self.sync_redis()
+
+        self.set_next_scheduled_update(delay_fetch_sec=delay_fetch_sec)
+
+    def calculate_last_story_date(self):
+        last_story_date = None
+
+        try:
+            latest_story = (
+                MStory.objects(story_feed_id=self.pk)
+                .limit(1)
+                .order_by("-story_date")
+                .only("story_date")
+                .first()
+            )
+            if latest_story:
+                last_story_date = latest_story.story_date
+        except MStory.DoesNotExist:
+            pass
+
+        if not last_story_date or seconds_timesince(last_story_date) < 0:
+            last_story_date = datetime.datetime.now()
+
+        if last_story_date != self.last_story_date:
+            self.last_story_date = last_story_date
+            self.save(update_fields=["last_story_date"])
+
+    def setup_feed_for_premium_subscribers(self, allow_skip_resync=False):
+        self.count_subscribers()
+        self.set_next_scheduled_update()
+        self.sync_redis(allow_skip_resync=allow_skip_resync)
+
+    def schedule_fetch_archive_feed(self):
+        from apps.profile.tasks import FetchArchiveFeedsChunk
+
+        logging.debug(f"~FC~SBScheduling fetch of archive feed ~SB{self.log_title}")
+        FetchArchiveFeedsChunk.apply_async(
+            kwargs=dict(feed_ids=[self.pk]),
+            queue="archive",
+            time_limit=settings.MAX_SECONDS_ARCHIVE_FETCH_SINGLE_FEED,
+        )
+
+    def check_feed_link_for_feed_address(self):
+        # Skip checking test fixtures with placeholder paths
+        if "%(NEWSBLUR_DIR)s" in self.feed_address:
+            return False, self
+
+        # Only the network lookup runs under the time limit. The save below can merge this
+        # feed into another one that already holds the discovered address, and a merge run
+        # inside the timelimit thread was abandoned when the limit passed and died partway
+        # through moving a popular feed's readers (forum #13860). apps/rss_feeds/models.py
+        @timelimit(10)
+        def _1():
+            feed_address = None
+            found_feed_urls = []
+            try:
+                logging.debug(" ---> Checking: %s" % self.feed_address)
+                validate_public_url(self.feed_address)
+                found_feed_urls = feedfinder_forman.find_feeds(self.feed_address)
+                if found_feed_urls:
+                    feed_address = found_feed_urls[0]
+            except (KeyError, UnsafeUrlError):
+                pass
+            if not len(found_feed_urls) and self.feed_link:
+                try:
+                    validate_public_url(self.feed_link)
+                    found_feed_urls = feedfinder_forman.find_feeds(self.feed_link)
+                except UnsafeUrlError:
+                    found_feed_urls = []
+                if len(found_feed_urls) and found_feed_urls[0] != self.feed_address:
+                    feed_address = found_feed_urls[0]
+            return feed_address
+
+        if self.feed_address_locked:
+            return False, self
+
+        try:
+            feed_address = _1()
+        except TimeoutError as e:
+            logging.debug("   ---> [%-30s] Feed address check timed out..." % (self.log_title[:30]))
+            self.save_feed_history(505, "Timeout", e)
+            return False, self
+
+        if not feed_address:
+            return False, self
+        if any(
+            ignored_domain in feed_address
+            for ignored_domain in [
+                "feedburner.com/atom.xml",
+                "feedburner.com/feed/",
+                "feedsportal.com",
+            ]
+        ):
+            logging.debug("  ---> Feed points to 'Wierdo' or 'feedsportal', ignoring.")
+            return False, self
+
+        feed_address = strip_underscore_from_feed_address(feed_address)
+        # Feed.save merges into a feed that already holds this address rather than raising.
+        # A merge that would move MERGE_FEEDS_LARGE_MOVE_SUBSCRIPTIONS or more readers goes to
+        # its own task instead, so it gets a time limit it can finish in and this fetch batch
+        # moves on; this feed keeps its old address until the merge settles which feed
+        # survives. A smaller merge cut short leaves this feed's row with its old address too,
+        # so its next failing fetch lands here again and the merge carries on.
+        holder = Feed.feed_holding_address(feed_address, self.feed_link, exclude_ids=[self.pk])
+        if holder:
+            from apps.reader.models import UserSubscription
+
+            _, losing_feed, _, _, _, _ = merge_feeds_orientation(holder, self)
+            moving = UserSubscription.objects.filter(feed_id=losing_feed.pk).count()
+            if moving >= MERGE_FEEDS_LARGE_MOVE_SUBSCRIPTIONS:
+                if queue_merge_feeds_once(holder.pk, self.pk, feed_address):
+                    logging.debug(
+                        "   ---> [%-30s] ~FRAddress belongs to feed %s, queued a merge that moves %s "
+                        "subscriptions" % (self.log_title[:30], holder.pk, moving)
+                    )
+                return False, self
+        self.feed_address = feed_address
+        feed = self.save()
+        if not feed:
+            # The row was deleted while this check ran and nothing took its place.
+            return False, self
+        return settle_address_check_merge(feed, feed_address)
+
+    def save_feed_history(self, status_code, message, exception=None, date=None):
+        fetch_history = MFetchHistory.add(
+            feed_id=self.pk,
+            fetch_type="feed",
+            code=int(status_code),
+            date=date,
+            message=message,
+            exception=exception,
+        )
+
+        if status_code not in (200, 304):
+            self.errors_since_good += 1
+            self.count_errors_in_history("feed", status_code, fetch_history=fetch_history)
+            self.set_next_scheduled_update()
+        elif self.has_feed_exception or self.errors_since_good:
+            self.errors_since_good = 0
+            self.has_feed_exception = False
+            self.active = True
+            self.save()
+
+    def save_page_history(self, status_code, message, exception=None, date=None):
+        fetch_history = MFetchHistory.add(
+            feed_id=self.pk,
+            fetch_type="page",
+            code=int(status_code),
+            date=date,
+            message=message,
+            exception=exception,
+        )
+
+        if status_code not in (200, 304):
+            self.count_errors_in_history("page", status_code, fetch_history=fetch_history)
+        elif self.has_page_exception or not self.has_page:
+            self.has_page_exception = False
+            self.has_page = True
+            self.active = True
+            self.save()
+
+    def count_errors_in_history(self, exception_type="feed", status_code=None, fetch_history=None):
+        if not fetch_history:
+            fetch_history = MFetchHistory.feed(self.pk)
+        fh = fetch_history[exception_type + "_fetch_history"]
+        non_errors = [h for h in fh if h["status_code"] and int(h["status_code"]) in (200, 304)]
+        errors = [h for h in fh if h["status_code"] and int(h["status_code"]) not in (200, 304)]
+
+        if len(non_errors) == 0 and len(errors) > 1:
+            self.active = True
+            if exception_type == "feed":
+                self.has_feed_exception = True
+                # self.active = False # No longer, just geometrically fetch
+            elif exception_type == "page":
+                self.has_page_exception = True
+            self.exception_code = status_code or int(errors[0])
+            self.save()
+        elif self.exception_code > 0:
+            self.active = True
+            self.exception_code = 0
+            if exception_type == "feed":
+                self.has_feed_exception = False
+            elif exception_type == "page":
+                self.has_page_exception = False
+            self.save()
+
+        logging.debug(
+            "   ---> [%-30s] ~FBCounting any errors in history: %s (%s non errors)"
+            % (self.log_title[:30], len(errors), len(non_errors))
+        )
+
+        return errors, non_errors
+
+    def count_redirects_in_history(self, fetch_type="feed", fetch_history=None):
+        logging.debug("   ---> [%-30s] Counting redirects in history..." % (self.log_title[:30]))
+        if not fetch_history:
+            fetch_history = MFetchHistory.feed(self.pk)
+        fh = fetch_history[fetch_type + "_fetch_history"]
+        redirects = [h for h in fh if h["status_code"] and int(h["status_code"]) in (301, 302)]
+        non_redirects = [h for h in fh if h["status_code"] and int(h["status_code"]) not in (301, 302)]
+
+        return redirects, non_redirects
+
+    @property
+    def original_feed_id(self):
+        if self.branch_from_feed:
+            return self.branch_from_feed.pk
+        else:
+            return self.pk
+
+    @property
+    def counts_converted_to_redis(self):
+        SUBSCRIBER_EXPIRE_DATE = datetime.datetime.now() - datetime.timedelta(days=settings.SUBSCRIBER_EXPIRE)
+        subscriber_expire = int(SUBSCRIBER_EXPIRE_DATE.strftime("%s"))
+        r = redis.Redis(connection_pool=settings.REDIS_FEED_SUB_POOL)
+        total_key = "s:%s" % self.original_feed_id
+        premium_key = "sp:%s" % self.original_feed_id
+        last_recount = r.zscore(total_key, -1)  # Need to subtract this extra when counting subs
+
+        # Check for expired feeds with no active users who would have triggered a cleanup
+        if last_recount and last_recount > subscriber_expire:
+            return True
+        elif last_recount:
+            logging.info(
+                "   ---> [%-30s] ~SN~FBFeed has expired redis subscriber counts (%s < %s), clearing..."
+                % (self.log_title[:30], last_recount, subscriber_expire)
+            )
+            r.delete(total_key, -1)
+            r.delete(premium_key, -1)
+
+        return False
+
+    def count_subscribers(self, recount=True, verbose=False):
+        if recount or not self.counts_converted_to_redis:
+            from apps.profile.models import Profile
+
+            Profile.count_feed_subscribers(feed_id=self.pk)
+        SUBSCRIBER_EXPIRE_DATE = datetime.datetime.now() - datetime.timedelta(days=settings.SUBSCRIBER_EXPIRE)
+        subscriber_expire = int(SUBSCRIBER_EXPIRE_DATE.strftime("%s"))
+        now = int(datetime.datetime.now().strftime("%s"))
+        r = redis.Redis(connection_pool=settings.REDIS_FEED_SUB_POOL)
+        total = 0
+        active = 0
+        premium = 0
+        archive = 0
+        pro = 0
+        active_premium = 0
+
+        # Include all branched feeds in counts
+        feed_ids = [f["id"] for f in Feed.objects.filter(branch_from_feed=self.original_feed_id).values("id")]
+        feed_ids.append(self.original_feed_id)
+        feed_ids = list(set(feed_ids))
+
+        if self.counts_converted_to_redis:
+            # For each branched feed, count different subscribers
+            for feed_id in feed_ids:
+                pipeline = r.pipeline()
+
+                # now+1 ensures `-1` flag will be corrected for later with - 1
+                total_key = "s:%s" % feed_id
+                premium_key = "sp:%s" % feed_id
+                archive_key = "sarchive:%s" % feed_id
+                pro_key = "spro:%s" % feed_id
+                pipeline.zcard(total_key)
+                pipeline.zcount(total_key, subscriber_expire, now + 1)
+                pipeline.zcard(premium_key)
+                pipeline.zcount(premium_key, subscriber_expire, now + 1)
+                pipeline.zcard(archive_key)
+                pipeline.zcard(pro_key)
+
+                results = pipeline.execute()
+
+                # -1 due to counts_converted_to_redis using key=-1 for last_recount date
+                total += max(0, results[0] - 1)
+                active += max(0, results[1] - 1)
+                premium += max(0, results[2] - 1)
+                active_premium += max(0, results[3] - 1)
+                archive += max(0, results[4] - 1)
+                pro += max(0, results[5] - 1)
+
+            original_num_subscribers = self.num_subscribers
+            original_active_subs = self.active_subscribers
+            original_premium_subscribers = self.premium_subscribers
+            original_active_premium_subscribers = self.active_premium_subscribers
+            original_archive_subscribers = self.archive_subscribers
+            original_pro_subscribers = self.pro_subscribers
+            logging.info(
+                "   ---> [%-30s] ~SN~FBCounting subscribers from ~FCredis~FB: ~FMt:~SB~FM%s~SN a:~SB%s~SN p:~SB%s~SN ap:~SB%s~SN archive:~SB%s~SN pro:~SB%s ~SN~FC%s"
+                % (
+                    self.log_title[:30],
+                    total,
+                    active,
+                    premium,
+                    active_premium,
+                    archive,
+                    pro,
+                    "(%s branches)" % (len(feed_ids) - 1) if len(feed_ids) > 1 else "",
+                )
+            )
+        else:
+            from apps.reader.models import UserSubscription
+
+            subs = UserSubscription.objects.filter(feed__in=feed_ids)
+            original_num_subscribers = self.num_subscribers
+            total = subs.count()
+
+            active_subs = UserSubscription.objects.filter(
+                feed__in=feed_ids, active=True, user__profile__last_seen_on__gte=SUBSCRIBER_EXPIRE_DATE
+            )
+            original_active_subs = self.active_subscribers
+            active = active_subs.count()
+
+            # The personal edition has a single tier, so every subscriber counts
+            # as a premium subscriber and the archive/pro counters stay at zero.
+            original_premium_subscribers = self.premium_subscribers
+            premium = active
+            original_archive_subscribers = self.archive_subscribers
+            archive = 0
+            original_pro_subscribers = self.pro_subscribers
+            pro = 0
+            original_active_premium_subscribers = self.active_premium_subscribers
+            active_premium = active
+            logging.debug(
+                "   ---> [%-30s] ~SN~FBCounting subscribers from ~FYpostgres~FB: ~FMt:~SB~FM%s~SN a:~SB%s~SN p:~SB%s~SN ap:~SB%s~SN archive:~SB%s~SN pro:~SB%s"
+                % (self.log_title[:30], total, active, premium, active_premium, archive, pro)
+            )
+
+        if settings.DOCKERBUILD:
+            # Local installs enjoy 100% active feeds
+            active = total
+
+        # If any counts have changed, save them
+        self.num_subscribers = total
+        self.active_subscribers = active
+        self.premium_subscribers = premium
+        self.active_premium_subscribers = active_premium
+        self.archive_subscribers = archive
+        self.pro_subscribers = pro
+        if (
+            self.num_subscribers != original_num_subscribers
+            or self.active_subscribers != original_active_subs
+            or self.premium_subscribers != original_premium_subscribers
+            or self.active_premium_subscribers != original_active_premium_subscribers
+            or self.archive_subscribers != original_archive_subscribers
+            or self.pro_subscribers != original_pro_subscribers
+        ):
+            if original_premium_subscribers == -1 or original_active_premium_subscribers == -1:
+                self.save()
+            else:
+                self.save(
+                    update_fields=[
+                        "num_subscribers",
+                        "active_subscribers",
+                        "premium_subscribers",
+                        "active_premium_subscribers",
+                        "archive_subscribers",
+                        "pro_subscribers",
+                    ]
+                )
+
+        if verbose:
+            if self.num_subscribers <= 1:
+                print(".", end=" ")
+            else:
+                print(
+                    "\n %s> %s subscriber%s: %s"
+                    % (
+                        "-" * min(self.num_subscribers, 20),
+                        self.num_subscribers,
+                        "" if self.num_subscribers == 1 else "s",
+                        self.feed_title,
+                    ),
+                    end=" ",
+                )
+
+    def _split_favicon_color(self, color=None):
+        if not color:
+            color = self.favicon_color
+        if not color:
+            return None, None, None
+        splitter = lambda s, p: [s[i : i + p] for i in range(0, len(s), p)]
+        red, green, blue = splitter(color[:6], 2)
+        return red, green, blue
+
+    def favicon_fade(self):
+        return self.adjust_color(adjust=30)
+
+    def adjust_color(self, color=None, adjust=0):
+        red, green, blue = self._split_favicon_color(color=color)
+        if red and green and blue:
+            fade_red = hex(min(int(red, 16) + adjust, 255))[2:].zfill(2)
+            fade_green = hex(min(int(green, 16) + adjust, 255))[2:].zfill(2)
+            fade_blue = hex(min(int(blue, 16) + adjust, 255))[2:].zfill(2)
+            return "%s%s%s" % (fade_red, fade_green, fade_blue)
+
+    def favicon_border(self):
+        red, green, blue = self._split_favicon_color()
+        if red and green and blue:
+            fade_red = hex(min(int(int(red, 16) * 0.75), 255))[2:].zfill(2)
+            fade_green = hex(min(int(int(green, 16) * 0.75), 255))[2:].zfill(2)
+            fade_blue = hex(min(int(int(blue, 16) * 0.75), 255))[2:].zfill(2)
+            return "%s%s%s" % (fade_red, fade_green, fade_blue)
+
+    def favicon_text_color(self):
+        # Color format: {r: 1, g: .5, b: 0}
+        def contrast(color1, color2):
+            lum1 = luminosity(color1)
+            lum2 = luminosity(color2)
+            if lum1 > lum2:
+                return (lum1 + 0.05) / (lum2 + 0.05)
+            else:
+                return (lum2 + 0.05) / (lum1 + 0.05)
+
+        def luminosity(color):
+            r = color["red"]
+            g = color["green"]
+            b = color["blue"]
+            val = lambda c: c / 12.92 if c <= 0.02928 else math.pow(((c + 0.055) / 1.055), 2.4)
+            red = val(r)
+            green = val(g)
+            blue = val(b)
+            return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+
+        red, green, blue = self._split_favicon_color()
+        if red and green and blue:
+            color = {
+                "red": int(red, 16) / 256.0,
+                "green": int(green, 16) / 256.0,
+                "blue": int(blue, 16) / 256.0,
+            }
+            white = {
+                "red": 1,
+                "green": 1,
+                "blue": 1,
+            }
+            grey = {
+                "red": 0.5,
+                "green": 0.5,
+                "blue": 0.5,
+            }
+
+            if contrast(color, white) > contrast(color, grey):
+                return "white"
+            else:
+                return "black"
+
+    def fill_out_archive_stories(self, force=False, starting_page=1):
+        """
+        Starting from page 1 and iterating through N pages, determine whether
+        page(i) matches page(i-1) and if there are any new stories.
+        """
+        before_story_count = MStory.objects(story_feed_id=self.pk).count()
+
+        if not force and not self.archive_subscribers:
+            logging.debug(
+                "   ---> [%-30s] ~FBNot filling out archive stories, no archive subscribers"
+                % (self.log_title[:30])
+            )
+            return before_story_count, before_story_count
+
+        # One walk per feed at a time. Copies of the same walk that run together only fight over
+        # the feed's lock, wait on it, and queue the walk again (utils/feed_fetcher.py
+        # process_archive_page). The lock lasts as long as the backfill task's time limit, so a
+        # walk killed at that limit frees the feed for the next one.
+        r = redis.Redis(connection_pool=settings.REDIS_FEED_UPDATE_POOL)
+        walk_lock = r.lock(
+            "archive_walk:%s" % self.pk,
+            timeout=settings.MAX_SECONDS_ARCHIVE_FETCH_SINGLE_FEED,
+            blocking=False,
+        )
+        if not walk_lock.acquire():
+            logging.debug(
+                "   ---> [%-30s] ~FBNot filling out archive stories, another walk of this feed is running"
+                % (self.log_title[:30])
+            )
+            return before_story_count, before_story_count
+
+        try:
+            self.update(archive_page=starting_page)
+        finally:
+            try:
+                walk_lock.release()
+            except LockError:
+                # The walk outlasted the lock, which has already expired.
+                pass
+
+        after_story_count = MStory.objects(story_feed_id=self.pk).count()
+        logging.debug(
+            "   ---> [%-30s] ~FCFilled out archive, ~FM~SB%s~SN new stories~FC, total of ~SB%s~SN stories"
+            % (self.log_title[:30], after_story_count - before_story_count, after_story_count)
+        )
+
+    def save_feed_stories_last_month(self, verbose=False):
+        month_ago = datetime.datetime.utcnow() - datetime.timedelta(days=30)
+        stories_last_month = MStory.objects(story_feed_id=self.pk, story_date__gte=month_ago).count()
+        if self.stories_last_month != stories_last_month:
+            self.stories_last_month = stories_last_month
+            self.save(update_fields=["stories_last_month"])
+
+        if verbose:
+            print(f"  ---> {self.feed} [{self.pk}]: {self.stories_last_month} stories last month")
+
+    def save_feed_story_history_statistics(self, current_counts=None):
+        """
+        Fills in missing months between earlier occurances and now.
+
+        Save format: [('YYYY-MM, #), ...]
+        Example output: [(2010-12, 123), (2011-01, 146)]
+        """
+        now = datetime.datetime.utcnow()
+        min_year = now.year
+        total = 0
+        month_count = 0
+        if not current_counts:
+            current_counts = self.data.story_count_history and json.decode(self.data.story_count_history)
+
+        if isinstance(current_counts, dict):
+            current_counts = current_counts["months"]
+
+        if not current_counts:
+            current_counts = []
+
+        # Count stories grouped by year/month/hour/day using aggregation pipeline
+        # (replaces MapReduce to avoid MongoDB's server-side JS lock contention)
+        dates = defaultdict(int)
+        hours = defaultdict(int)
+        days = defaultdict(int)
+        rows = (
+            MStory.objects.filter(story_feed_id=self.pk)
+            .annotate(
+                story_year=ExtractYear("story_date"),
+                story_month=ExtractMonth("story_date"),
+                story_hour=ExtractHour("story_date"),
+                story_week_day=ExtractWeekDay("story_date"),
+            )
+            .values("story_year", "story_month", "story_hour", "story_week_day")
+            .annotate(count=Count("id"))
+        )
+        for row in rows:
+            year = row["story_year"]
+            month = row["story_month"]
+            hour = row["story_hour"]
+            # ExtractWeekDay: 1=Sun..7=Sat -> JS getDay(): 0=Sun..6=Sat
+            day = row["story_week_day"] - 1
+            count = row["count"]
+            key = "%s-%s" % (year, month)
+            dates[key] += count
+            hours[hour] += count
+            days[day] += count
+            if year < min_year and year > 2000:
+                min_year = year
+
+        # Add on to existing months, always amending up, never down. (Current month
+        # is guaranteed to be accurate, since trim_feeds won't delete it until after
+        # a month. Hacker News can have 1,000+ and still be counted.)
+        for current_month, current_count in current_counts:
+            year = int(re.findall(r"(\d{4})-\d{1,2}", current_month)[0])
+            if current_month not in dates or dates[current_month] < current_count:
+                dates[current_month] = current_count
+            if year < min_year and year > 2000:
+                min_year = year
+
+        # Assemble a list with 0's filled in for missing months,
+        # trimming left and right 0's.
+        months = []
+        start = False
+        for year in range(min_year, now.year + 1):
+            for month in range(1, 12 + 1):
+                if datetime.datetime(year, month, 1) < now:
+                    key = "%s-%s" % (year, month)
+                    if dates.get(key) or start:
+                        start = True
+                        months.append((key, dates.get(key, 0)))
+                        total += dates.get(key, 0)
+                        if dates.get(key, 0) > 0:
+                            month_count += 1  # Only count months that have stories for the average
+        original_story_count_history = self.data.story_count_history
+        self.data.story_count_history = json.encode({"months": months, "hours": hours, "days": days})
+        if self.data.story_count_history != original_story_count_history:
+            self.data.save(update_fields=["story_count_history"])
+
+        original_average_stories_per_month = self.average_stories_per_month
+        if not total or not month_count:
+            self.average_stories_per_month = 0
+        else:
+            self.average_stories_per_month = int(round(total / float(month_count)))
+        if self.average_stories_per_month != original_average_stories_per_month:
+            self.save(update_fields=["average_stories_per_month"])
+
+    def save_classifier_counts(self):
+        from apps.analyzer.models import (
+            MClassifierAuthor,
+            MClassifierFeed,
+            MClassifierTag,
+            MClassifierText,
+            MClassifierTitle,
+        )
+
+        def calculate_scores(cls, facet):
+            scores = []
+            rows = (
+                cls.objects.filter(feed_id=self.pk)
+                .exclude(**{facet: None})
+                .values(facet)
+                .annotate(
+                    pos=Sum(
+                        Case(When(score__gt=0, then=F("score")), default=0, output_field=IntegerField())
+                    ),
+                    neg=Sum(
+                        Case(When(score__lt=0, then=Abs("score")), default=0, output_field=IntegerField())
+                    ),
+                )
+            )
+            for row in rows:
+                pos = int(row["pos"] or 0)
+                neg = int(row["neg"] or 0)
+                if pos + neg >= 1:
+                    scores.append({"pos": pos, "neg": neg, facet: row[facet]})
+            scores = sorted(scores, key=lambda v: v["neg"] - v["pos"])
+
+            return scores
+
+        scores = {}
+        for cls, facet in [
+            (MClassifierTitle, "title"),
+            (MClassifierText, "text"),
+            (MClassifierAuthor, "author"),
+            (MClassifierTag, "tag"),
+            (MClassifierFeed, "feed_id"),
+        ]:
+            scores[facet] = calculate_scores(cls, facet)
+            if facet == "feed_id" and scores[facet]:
+                scores["feed"] = scores[facet]
+                del scores["feed_id"]
+            elif not scores[facet]:
+                del scores[facet]
+
+        if scores:
+            self.data.feed_classifier_counts = json.encode(scores)
+            self.data.save()
+
+        return scores
+
+    @property
+    def user_agent(self):
+        feed_parts = urllib.parse.urlparse(self.feed_address)
+        if feed_parts.netloc.find(".tumblr.com") != -1:
+            # Certain tumblr feeds will redirect to tumblr's login page when fetching.
+            # A known workaround is using facebook's user agent.
+            return "facebookexternalhit/1.0 (+http://www.facebook.com/externalhit_uatext.php)"
+
+        ua = "NewsBlur Feed Fetcher - %s subscriber%s - %s %s" % (
+            self.num_subscribers,
+            "s" if self.num_subscribers != 1 else "",
+            self.permalink,
+            self.fake_user_agent,
+        )
+
+        return ua
+
+    @property
+    def fake_user_agent(self):
+        ua = (
+            '("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            'Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0")'
+        )
+
+        return ua
+
+    @property
+    def plain_user_agent(self):
+        """NewsBlur Feed Fetcher UA without the fake browser suffix.
+        Used as a fallback when the browser UA triggers bot challenges (e.g. Anubis)."""
+        ua = "NewsBlur Feed Fetcher - %s subscriber%s - %s" % (
+            self.num_subscribers,
+            "s" if self.num_subscribers != 1 else "",
+            self.permalink,
+        )
+        return ua
+
+    def fetch_headers(self, fake=False, plain=False):
+        if plain:
+            ua = self.plain_user_agent
+        elif fake:
+            ua = self.fake_user_agent
+        else:
+            ua = self.user_agent
+        headers = {
+            "User-Agent": ua,
+            "Accept": "application/atom+xml, application/rss+xml, application/xml;q=0.8, text/xml;q=0.6, */*;q=0.2",
+            "Accept-Encoding": "gzip, deflate",
+        }
+
+        return headers
+
+    def update(self, **kwargs):
+        if self.pk is None:
+            logging.info(" ---> ~FRFeed.update() called with pk=None, skipping")
+            return None
+        try:
+            from utils import feed_fetcher
+        except ImportError as e:
+            logging.info(" ***> ~BR~FRImportError: %s" % e)
+            return
+        r = redis.Redis(connection_pool=settings.REDIS_FEED_UPDATE_POOL)
+        original_feed_id = int(self.pk)
+
+        options = {
+            "verbose": kwargs.get("verbose"),
+            "timeout": 10,
+            "single_threaded": kwargs.get("single_threaded", True),
+            "force": kwargs.get("force"),
+            "force_fp": kwargs.get("force_fp"),
+            "compute_scores": kwargs.get("compute_scores", True),
+            "mongodb_replication_lag": kwargs.get("mongodb_replication_lag", None),
+            "fake": kwargs.get("fake"),
+            "quick": kwargs.get("quick"),
+            "updates_off": kwargs.get("updates_off"),
+            "debug": kwargs.get("debug"),
+            "fpf": kwargs.get("fpf"),
+            "feed_xml": kwargs.get("feed_xml"),
+            "requesting_user_id": kwargs.get("requesting_user_id", None),
+            "archive_page": kwargs.get("archive_page", None),
+            "max_stories": kwargs.get("max_stories"),
+        }
+
+        if getattr(settings, "TEST_DEBUG", False) and "NEWSBLUR_DIR" in self.feed_address:
+            print(" ---> Testing feed fetch: %s" % self.log_title)
+            # options['force_fp'] = True # No, why would this be needed?
+            original_feed_address = self.feed_address
+            original_feed_link = self.feed_link
+            self.feed_address = self.feed_address.replace("%(NEWSBLUR_DIR)s", settings.NEWSBLUR_DIR)
+            if self.feed_link:
+                self.feed_link = self.feed_link.replace("%(NEWSBLUR_DIR)s", settings.NEWSBLUR_DIR)
+            if self.feed_address != original_feed_address or self.feed_link != original_feed_link:
+                self.save(update_fields=["feed_address", "feed_link"])
+
+        # Per-domain fetch budget shared across all task servers, modeled on the
+        # Reddit API budget in utils/reddit_fetcher.py. When a domain's per-minute
+        # budget is spent, silently defer this fetch (no fetch history, no exception)
+        # instead of hammering the site: one Pro user's 1,100 abebooks.com web feeds
+        # at Pro speed added up to ~175,000 fetches/day against a single domain.
+        # Forced fetches (user-initiated refresh) still count against the budget but
+        # are never deferred. See utils/domain_fetch_limiter.py.
+        if not self.is_newsletter:
+            from utils import domain_fetch_limiter
+
+            allowed, defer_sec = domain_fetch_limiter.reserve_fetch_slot(self.feed_address)
+            if not allowed and not options.get("force"):
+                logging.debug(
+                    "   ---> [%-30s] ~FY~SBDomain fetch budget spent~SN~FY, deferring %s min: %s"
+                    % (self.log_title[:30], defer_sec // 60, self.feed_address)
+                )
+                self.set_next_scheduled_update(delay_fetch_sec=defer_sec)
+                r.zrem("tasked_feeds", original_feed_id)
+                r.zrem("error_feeds", original_feed_id)
+                return self
+
+        if self.is_newsletter:
+            feed = self.update_newsletter_icon()
+            if not feed.fetched_once:
+                feed.fetched_once = True
+                feed.save(update_fields=["fetched_once"])
+        else:
+            disp = feed_fetcher.Dispatcher(options, 1)
+            disp.add_jobs([[self.pk]])
+            feed = disp.run_jobs()
+
+        if feed:
+            feed = Feed.get_by_id(feed.pk)
+        if feed:
+            feed.last_update = datetime.datetime.utcnow()
+            feed.set_next_scheduled_update()
+            r.zadd("fetched_feeds_last_hour", {feed.pk: int(datetime.datetime.now().strftime("%s"))})
+
+        if not feed or original_feed_id != feed.pk:
+            logging.info(
+                " ---> ~FRFeed changed id, removing %s from tasked_feeds queue..." % original_feed_id
+            )
+            r.zrem("tasked_feeds", original_feed_id)
+            r.zrem("error_feeds", original_feed_id)
+        if feed:
+            r.zrem("tasked_feeds", feed.pk)
+            r.zrem("error_feeds", feed.pk)
+
+        return feed
+
+    def update_newsletter_icon(self):
+        from apps.rss_feeds.icon_importer import IconImporter
+
+        icon_importer = IconImporter(self)
+        icon_importer.save()
+
+        return self
+
+    @classmethod
+    def get_by_id(cls, feed_id, feed_address=None):
+        try:
+            feed = Feed.objects.get(pk=feed_id)
+            return feed
+        except Feed.DoesNotExist:
+            # Feed has been merged after updating. Find the right feed.
+            duplicate_feeds = DuplicateFeed.objects.filter(duplicate_feed_id=feed_id)
+            if duplicate_feeds:
+                return duplicate_feeds[0].feed
+            if feed_address:
+                duplicate_feeds = DuplicateFeed.objects.filter(duplicate_address=feed_address)
+                if duplicate_feeds:
+                    return duplicate_feeds[0].feed
+
+    def add_update_stories(self, stories, existing_stories, verbose=False, updates_off=False):
+        ret_values = dict(new=0, updated=0, same=0, error=0)
+        error_count = self.error_count
+        new_story_hashes = [s.get("story_hash") for s in stories]
+        discover_story_ids = []
+
+        if settings.DEBUG or verbose:
+            logging.debug(
+                "   ---> [%-30s] ~FBChecking ~SB%s~SN new/updated against ~SB%s~SN stories"
+                % (self.log_title[:30], len(stories), len(list(existing_stories.keys())))
+            )
+
+        # Story filters run once per fetch, not once per story: the rule set only
+        # changes when a reader edits it (apps/rss_feeds/filters.py).
+        from apps.rss_feeds import filters as story_filters
+
+        story_filter_rules = story_filters.rules_for_feed(self)
+
+        @timelimit(5)
+        def _1(story, story_content, existing_stories, new_story_hashes):
+            existing_story, story_has_changed = self._exists_story(
+                story, story_content, existing_stories, new_story_hashes
+            )
+            return existing_story, story_has_changed
+
+        for story in stories:
+            # Under ProcessFeed's short lease on the feed's merge lock: a story can take a
+            # while (a Google News story's image lookup), so the lease is checked before
+            # each one. A no-op outside a lock.
+            try:
+                renew_merge_feeds_locks()
+            except LockError as e:
+                # The lease is gone. The stories stored so far stay counted, so their unread
+                # counts and notifications still go out; the rest wait for the next fetch,
+                # which ProcessFeed brings forward and for which it leaves the validators
+                # unsaved.
+                logging.debug(
+                    "   ---> [%-30s] ~FRLease lost after %s new stories, leaving the rest to the next fetch: %s"
+                    % (self.log_title[:30], ret_values["new"], e)
+                )
+                ret_values["lease_lost"] = True
+                break
+            if verbose:
+                logging.debug(
+                    "   ---> [%-30s] ~FBChecking ~SB%s~SN / ~SB%s"
+                    % (self.log_title[:30], story.get("title"), story.get("guid"))
+                )
+
+            story_content = story.get("story_content")
+            if error_count:
+                story_content = strip_comments__lxml(story_content)
+            else:
+                story_content = strip_comments(story_content)
+            story_tags = self.get_tags(story)
+            story_link = self.get_permalink(story)
+            replace_story_date = False
+
+            try:
+                existing_story, story_has_changed = _1(
+                    story, story_content, existing_stories, new_story_hashes
+                )
+            except TimeoutError:
+                logging.debug(
+                    "   ---> [%-30s] ~SB~FRExisting story check timed out..." % (self.log_title[:30])
+                )
+                existing_story = None
+                story_has_changed = False
+
+            if existing_story is None:
+                if settings.DEBUG and verbose:
+                    logging.debug(
+                        "   ---> New story in feed (%s - %s): %s"
+                        % (self.feed_title, story.get("title"), len(story_content))
+                    )
+
+                s = MStory(
+                    story_feed_id=self.pk,
+                    story_date=story.get("published"),
+                    story_title=story.get("title"),
+                    story_content=story_content,
+                    story_author_name=story.get("author"),
+                    story_permalink=story_link,
+                    story_guid=story.get("guid"),
+                    story_tags=story_tags,
+                )
+                try:
+                    s.save()
+                    ret_values["new"] += 1
+                    if story_filter_rules:
+                        story_filters.apply_rules(story_filter_rules, s, self.pk, verbose=verbose)
+                    s.publish_to_subscribers()
+                except NotUniqueError:
+                    ret_values["same"] += 1
+                    continue
+                except (IntegrityError, OperationError) as e:
+                    ret_values["error"] += 1
+                    if settings.DEBUG:
+                        logging.info(
+                            "   ---> [%-30s] ~SN~FRIntegrityError on new story: %s - %s"
+                            % (self.feed_title[:30], story.get("guid"), e)
+                        )
+                    continue
+                if self.is_google_news_feed and s:
+                    s.fetch_og_image()
+                    if s.image_urls:
+                        try:
+                            s.save()
+                        except NotUniqueError as e:
+                            # A racing fetcher won this story_hash between the save above
+                            # and here. The story is already stored and counted as new, so
+                            # only the og:image URLs are lost.
+                            logging.debug(
+                                "   ---> [%-30s] ~SN~FRNotUniqueError on og:image save: %s - %s"
+                                % (self.feed_title[:30], story.get("guid"), e)
+                            )
+                if s and s.story_hash:
+                    discover_story_ids.append(s.story_hash)
+            elif existing_story and story_has_changed and not updates_off and ret_values["updated"] < 3:
+                # update story
+                original_content = None
+                try:
+                    if existing_story and existing_story.id:
+                        try:
+                            existing_story = MStory.objects.get(id=existing_story.id)
+                        except ValidationError:
+                            existing_story, _ = MStory.find_story(
+                                existing_story.story_feed_id, existing_story.id, original_only=True
+                            )
+                    elif existing_story and existing_story.story_hash:
+                        existing_story, _ = MStory.find_story(
+                            existing_story.story_feed_id, existing_story.story_hash, original_only=True
+                        )
+                    else:
+                        raise MStory.DoesNotExist
+                except (MStory.DoesNotExist, OperationError) as e:
+                    ret_values["error"] += 1
+                    if verbose:
+                        logging.info(
+                            "   ---> [%-30s] ~SN~FROperation on existing story: %s - %s"
+                            % (self.feed_title[:30], story.get("guid"), e)
+                        )
+                    continue
+                if existing_story.story_original_content_z:
+                    original_content = zlib.decompress(existing_story.story_original_content_z)
+                elif existing_story.story_content_z:
+                    original_content = zlib.decompress(existing_story.story_content_z)
+                if story_content and len(story_content) > 10:
+                    if "<code" in story_content:
+                        # Don't mangle stories with code, just use new
+                        story_content_diff = story_content
+                    else:
+                        story_content_diff = htmldiff(smart_str(original_content), smart_str(story_content))
+                else:
+                    story_content_diff = original_content
+                # logging.debug("\t\tDiff: %s %s %s" % diff.getStats())
+                # logging.debug("\t\tDiff content: %s" % diff.getDiff())
+                # if existing_story.story_title != story.get('title'):
+                #    logging.debug('\tExisting title / New: : \n\t\t- %s\n\t\t- %s' % (existing_story.story_title, story.get('title')))
+                if existing_story.story_hash != story.get("story_hash"):
+                    try:
+                        self.update_story_with_new_guid(existing_story, story.get("guid"))
+                        # The migration walked every recent reader; the lease is checked
+                        # again before this story's own write.
+                        renew_merge_feeds_locks()
+                    except LockError as e:
+                        logging.debug(
+                            "   ---> [%-30s] ~FRLease lost while migrating a story's identifier, leaving the rest "
+                            "to the next fetch: %s" % (self.log_title[:30], e)
+                        )
+                        ret_values["lease_lost"] = True
+                        break
+
+                if verbose:
+                    logging.debug(
+                        "- Updated story in feed (%s - %s): %s / %s"
+                        % (self.feed_title, story.get("title"), len(story_content_diff), len(story_content))
+                    )
+
+                existing_story.story_feed = self.pk
+                existing_story.story_title = story.get("title")
+                existing_story.story_content = story_content_diff
+                existing_story.story_latest_content = story_content
+                existing_story.story_original_content = original_content
+                existing_story.story_author_name = story.get("author")
+                existing_story.story_permalink = story_link
+                existing_story.story_guid = story.get("guid")
+                existing_story.story_tags = story_tags
+                existing_story.original_text_z = None  # Reset Text view cache
+                # Do not allow publishers to change the story date once a story is published.
+                # Leads to incorrect unread story counts.
+                if replace_story_date:
+                    existing_story.story_date = story.get("published")  # Really shouldn't do this.
+                existing_story.extract_image_urls(force=True)
+                try:
+                    existing_story.save()
+                    ret_values["updated"] += 1
+                except (IntegrityError, OperationError):
+                    ret_values["error"] += 1
+                    if verbose:
+                        logging.info(
+                            "   ---> [%-30s] ~SN~FRIntegrityError on updated story: %s"
+                            % (self.feed_title[:30], story.get("title")[:30])
+                        )
+                except ValidationError:
+                    ret_values["error"] += 1
+                    if verbose:
+                        logging.info(
+                            "   ---> [%-30s] ~SN~FRValidationError on updated story: %s"
+                            % (self.feed_title[:30], story.get("title")[:30])
+                        )
+            else:
+                ret_values["same"] += 1
+                if verbose:
+                    logging.debug(
+                        "Unchanged story (%s): %s / %s "
+                        % (story.get("story_hash"), story.get("guid"), story.get("title"))
+                    )
+
+        # Hand back the hashes of the stories actually created this run. AI prompt
+        # classifiers need to know precisely which stories are new: inferring them
+        # by taking the newest N by date silently picks the wrong stories whenever
+        # a feed publishes out of order. See utils/feed_fetcher.py.
+        ret_values["new_story_hashes"] = discover_story_ids
+
+        return ret_values
+
+    def update_story_with_new_guid(self, existing_story, new_story_guid):
+        from apps.reader.models import RUserStory
+
+        old_hash = existing_story.story_hash
+        new_hash = MStory.ensure_story_hash(new_story_guid, self.pk)
+        # Walks every recent reader of the feed, renewing the fetch lease as it goes. The
+        # story's old Redis and search entries go only after that walk and one more lease
+        # check: a lease lost in the walk leaves the story exactly as it was, findable by
+        # its old hash, so the next fetch matches it again and redoes the migration (the
+        # read-state copies the walk already made are idempotent) instead of inserting a
+        # duplicate with no read state.
+        RUserStory.switch_hash(feed=self, old_hash=old_hash, new_hash=new_hash)
+        renew_merge_feeds_locks()
+        existing_story.remove_from_redis()
+
+    def save_popular_tags(self, feed_tags=None, verbose=False):
+        if not feed_tags:
+            tag_counts = Counter()
+            story_tags = MStory.objects.filter(story_feed_id=self.pk).values_list("story_tags", flat=True)
+            for tags in story_tags:
+                for tag in tags or []:
+                    tag_counts[tag] += 1
+            feed_tags = [(tag, count) for tag, count in tag_counts.most_common(25) if count > 0]
+        popular_tags = json.encode(feed_tags)
+        if verbose:
+            print("Found %s tags: %s" % (len(feed_tags), popular_tags))
+
+        # TODO: This len() bullshit will be gone when feeds move to mongo
+        #       On second thought, it might stay, because we don't want
+        #       popular tags the size of a small planet. I'm looking at you
+        #       Tumblr writers.
+        if len(popular_tags) < 1024:
+            if self.data.popular_tags != popular_tags:
+                self.data.popular_tags = popular_tags
+                self.data.save(update_fields=["popular_tags"])
+            return
+
+        tags_list = []
+        if feed_tags and isinstance(feed_tags, str):
+            tags_list = json.decode(feed_tags)
+        if len(tags_list) >= 1:
+            self.save_popular_tags(tags_list[:-1])
+
+    def save_popular_authors(self, feed_authors=None):
+        if not feed_authors:
+            feed_authors = list(
+                MStory.objects.filter(story_feed_id=self.pk)
+                .exclude(story_author_name__in=[None, ""])
+                .values("story_author_name")
+                .annotate(count=Count("id"))
+                .order_by("-count")[:20]
+                .values_list("story_author_name", "count")
+            )
+
+        popular_authors = json.encode(feed_authors)
+        if len(popular_authors) < 1023:
+            if self.data.popular_authors != popular_authors:
+                self.data.popular_authors = popular_authors
+                self.data.save(update_fields=["popular_authors"])
+            return
+
+        if len(feed_authors) > 1:
+            self.save_popular_authors(feed_authors=feed_authors[:-1])
+
+    @classmethod
+    def trim_old_stories(cls, start=0, verbose=True, dryrun=False, total=0, end=None):
+        now = datetime.datetime.now()
+        month_ago = now - datetime.timedelta(days=settings.DAYS_OF_STORY_HASHES)
+        feed_count = end or Feed.objects.latest("pk").pk
+
+        for feed_id in range(start, feed_count):
+            if feed_id % 1000 == 0:
+                print(
+                    "\n\n -------------------------- %s (%s deleted so far) --------------------------\n\n"
+                    % (feed_id, total)
+                )
+            try:
+                feed = Feed.objects.get(pk=feed_id)
+            except Feed.DoesNotExist:
+                continue
+            # Ensure only feeds with no active subscribers are being trimmed
+            if (
+                feed.active_subscribers <= 0
+                and (not feed.archive_subscribers or feed.archive_subscribers <= 0)
+                and (not feed.last_story_date or feed.last_story_date < month_ago)
+            ):
+                # 1 month since last story = keep 5 stories, >6 months since, only keep 1 story
+                months_ago = 6
+                if feed.last_story_date:
+                    months_ago = int((now - feed.last_story_date).days / 30.0)
+                cutoff = max(1, 6 - months_ago)
+                if dryrun:
+                    print(" DRYRUN: %s cutoff - %s" % (cutoff, feed))
+                else:
+                    total += MStory.trim_feed(feed=feed, cutoff=cutoff, verbose=verbose)
+            else:
+                if dryrun:
+                    print(" DRYRUN: %s/%s cutoff - %s" % (cutoff, feed.story_cutoff, feed))
+                else:
+                    total += feed.trim_feed(verbose=verbose)
+
+        print(" ---> Deleted %s stories in total." % total)
+
+    @property
+    def story_cutoff(self):
+        return self.number_of_stories_to_store()
+
+    def number_of_stories_to_store(self, pre_archive=False, published_count=0):
+        cutoff, _ = self.story_retention(pre_archive=pre_archive, published_count=published_count)
+        return cutoff
+
+    def story_retention_ceiling(self):
+        """The most stories this feed may keep, whatever its response size. Archive
+        subscribers keep ten times as much. apps/rss_feeds/models.py"""
+        if self.archive_subscribers and self.archive_subscribers > 0:
+            return settings.STORY_RETENTION_MAX_PER_FEED_ARCHIVE
+        return settings.STORY_RETENTION_MAX_PER_FEED
+
+    def story_retention(self, pre_archive=False, published_count=0):
+        """How many stories this feed keeps, and whether the no-reads cap set that number.
+        published_count is the number of stories in the feed's current response.
+        apps/rss_feeds/models.py"""
+        if self.archive_subscribers and self.archive_subscribers > 0 and not pre_archive:
+            return self.story_retention_ceiling(), False
+
+        cutoff = 500
+        if self.active_subscribers <= 0:
+            cutoff = 25
+        elif self.active_premium_subscribers < 1:
+            cutoff = 100
+        elif self.active_premium_subscribers <= 2:
+            cutoff = 200
+        elif self.active_premium_subscribers <= 5:
+            cutoff = 300
+        elif self.active_premium_subscribers <= 10:
+            cutoff = 350
+        elif self.active_premium_subscribers <= 15:
+            cutoff = 400
+        elif self.active_premium_subscribers <= 20:
+            cutoff = 450
+
+        if self.active_subscribers and self.average_stories_per_month < 5 and self.stories_last_month < 5:
+            cutoff /= 2
+        if (
+            self.active_premium_subscribers <= 1
+            and self.average_stories_per_month <= 1
+            and self.stories_last_month <= 1
+        ):
+            cutoff /= 2
+
+        r = redis.Redis(connection_pool=settings.REDIS_FEED_READ_POOL)
+        pipeline = r.pipeline()
+        read_stories_per_week = []
+        now = datetime.datetime.now()
+
+        # Check to see how many stories have been read each week since the feed's days of story hashes
+        for weeks_back in range(2 * int(math.floor(settings.DAYS_OF_STORY_HASHES / 7))):
+            weeks_ago = now - datetime.timedelta(days=7 * weeks_back)
+            week_of_year = weeks_ago.strftime("%Y-%U")
+            feed_read_key = "fR:%s:%s" % (self.pk, week_of_year)
+            pipeline.get(feed_read_key)
+        read_stories_per_week = pipeline.execute()
+        read_stories_last_month = sum([int(rs) for rs in read_stories_per_week if rs])
+        unread_capped = False
+        if not pre_archive and read_stories_last_month == 0:
+            unread_capped = True
+            original_cutoff = cutoff
+            # apps/rss_feeds/models.py still keeps every story in the feed's current response, so a feed that
+            # posts a whole issue at once (forum #13884) isn't cut to its newest 10 the moment it arrives, and
+            # stories it trimmed aren't re-added as new on every fetch.
+            cutoff = min(cutoff, max(FEWEST_STORIES_KEPT, published_count))
+            try:
+                logging.debug(
+                    "   ---> [%-30s] ~FBTrimming down to ~SB%s (instead of %s)~SN stories (~FM%s~FB)"
+                    % (
+                        self.log_title[:30],
+                        cutoff,
+                        original_cutoff,
+                        (
+                            self.last_story_date.strftime("%Y-%m-%d")
+                            if self.last_story_date
+                            else "No last story date"
+                        ),
+                    )
+                )
+            except ValueError as e:
+                logging.debug("   ***> [%-30s] Error trimming: %s" % (self.log_title[:30], e))
+
+        # A feed that hands over its whole archive in one response (published_count) used to
+        # keep every item, so the count above is a ceiling rather than a target.
+        cutoff = min(cutoff, self.story_retention_ceiling())
+
+        if getattr(settings, "OVERRIDE_STORY_COUNT_MAX", None):
+            cutoff = settings.OVERRIDE_STORY_COUNT_MAX
+
+        return int(cutoff), unread_capped
+
+    def trim_feed(self, verbose=False, cutoff=None, fetched_story_hashes=None, days=None):
+        if not cutoff and self.active_subscribers <= 0 and self.has_reader_within_unread_window():
+            # The fetch that finds every reader away SUBSCRIBER_EXPIRE days is the feed's last until
+            # one comes back, but they keep DAYS_OF_UNREAD days of unread stories, which story_retention's
+            # no-readers cutoff of 25 would delete. Feed.trim_if_abandoned trims it once that has passed.
+            return 0
+
+        fetched_story_hashes = fetched_story_hashes or []
+        keep_story_hashes = None
+        if not cutoff:
+            cutoff, unread_capped = self.story_retention(published_count=len(fetched_story_hashes))
+            if unread_capped:
+                # apps/rss_feeds/models.py ranks the current response first only under the no-reads cap;
+                # read and archive feeds keep trimming purely by date.
+                keep_story_hashes = fetched_story_hashes
+
+        stories_removed = MStory.trim_feed(
+            feed=self, cutoff=cutoff, verbose=verbose, keep_story_hashes=keep_story_hashes
+        )
+        stories_removed += MStory.trim_feed_by_age(
+            feed=self,
+            days=settings.STORY_RETENTION_DAYS if days is None else days,
+            min_keep=settings.STORY_RETENTION_MIN_PER_FEED,
+            verbose=verbose,
+            keep_story_hashes=keep_story_hashes,
+        )
+
+        if not self.fs_size_bytes:
+            self.count_fs_size_bytes()
+
+        return stories_removed
+
+    def enforce_story_retention(self, verbose=False, days=None):
+        """Applies the absolute ceiling and the age cap to this feed. The count cap in
+        story_retention runs after a fetch that brings new stories; this runs on the daily
+        sweep so a feed that stopped publishing, or one that dumped its whole archive in a
+        single response, still comes back down. apps/rss_feeds/models.py"""
+        removed = 0
+        ceiling = self.story_retention_ceiling()
+        if MStory.objects(story_feed_id=self.pk).count() > ceiling:
+            removed += MStory.trim_feed(feed=self, cutoff=ceiling, verbose=verbose)
+        removed += MStory.trim_feed_by_age(
+            feed=self,
+            days=settings.STORY_RETENTION_DAYS if days is None else days,
+            min_keep=settings.STORY_RETENTION_MIN_PER_FEED,
+            verbose=verbose,
+        )
+        return removed
+
+    @classmethod
+    def enforce_story_retention_on_all(cls, verbose=False, limit=None, days=None):
+        """Daily sweep over every feed, including the ones nothing fetches any more.
+        apps/rss_feeds/models.py"""
+        removed_total = 0
+        feeds = cls.objects.all().order_by("pk")
+        if limit:
+            feeds = feeds[:limit]
+        for feed in feeds.iterator():
+            try:
+                removed_total += feed.enforce_story_retention(verbose=verbose, days=days)
+            except Exception as e:
+                # One bad feed shouldn't hold up the rest; it is tried again tomorrow.
+                logging.debug(" ***> ~FRCouldn't enforce retention on feed %s: %s" % (feed.pk, e))
+        return removed_total
+
+    def subscriber_feed_ids(self):
+        """The original feed and its branches, which count_subscribers counts subscribers across.
+        apps/rss_feeds/models.py"""
+        feed_ids = list(
+            Feed.objects.filter(branch_from_feed=self.original_feed_id).values_list("pk", flat=True)
+        )
+        feed_ids.append(self.original_feed_id)
+        return feed_ids
+
+    def has_reader_within_unread_window(self):
+        """Whether anyone subscribed has been seen in the last DAYS_OF_UNREAD days and so may still
+        have unread stories here. apps/rss_feeds/models.py"""
+        from apps.reader.models import UserSubscription
+
+        unread_window_start = datetime.datetime.now() - datetime.timedelta(days=settings.DAYS_OF_UNREAD)
+        return UserSubscription.objects.filter(
+            feed__in=self.subscriber_feed_ids(),
+            active=True,
+            user__profile__last_seen_on__gte=unread_window_start,
+        ).exists()
+
+    def has_archive_subscriber(self):
+        """The personal edition has no Archive tier, so no feed has one.
+        apps/rss_feeds/models.py"""
+        return False
+
+    @classmethod
+    def abandoned_feed_candidates(cls):
+        """Feeds that may be abandoned: no active subscribers and no fetch in
+        DAYS_OF_UNREAD - SUBSCRIBER_EXPIRE days. A feed stops being fetched once its last reader
+        has been away SUBSCRIBER_EXPIRE days, so a last fetch that old means nobody has been seen
+        in DAYS_OF_UNREAD days. Feed.trim_if_abandoned confirms that before deleting anything.
+        apps/rss_feeds/models.py"""
+        unfetched_since = datetime.datetime.now() - datetime.timedelta(
+            days=settings.DAYS_OF_UNREAD - settings.SUBSCRIBER_EXPIRE
+        )
+        return cls.objects.filter(active_subscribers__lte=0, last_update__lte=unfetched_since)
+
+    @classmethod
+    def trim_if_abandoned(cls, feed_id, dryrun=False):
+        """Trims a feed nobody can still read and returns how many stories went, or in a dry run,
+        about how many would. Nothing fetches a feed without active subscribers, so the trim after
+        each fetch (utils/feed_fetcher.py) stops once its last reader leaves, and a feed an Archive
+        subscriber left kept up to 10,000 stories. Readers keep DAYS_OF_UNREAD days of unread
+        stories and Archive subscribers keep everything, so a feed is abandoned only once it has no
+        Archive subscriber and no subscriber has been seen in that long.
+        apps/rss_feeds/models.py"""
+        stored = MStory.objects(story_feed_id=feed_id).count()
+        if stored <= FEWEST_STORIES_KEPT:
+            return 0
+        feed = cls.objects.filter(pk=feed_id).first()
+        if not feed:
+            return 0
+        # A feed trimmed on an earlier day sits at its cutoff, often above the floor when its last
+        # reader read it recently. trim_feed would delete nothing, so skip the recount and the
+        # reader lookup. That only holds while the stored counts show no readers and no Archive
+        # subscriber, as every daily candidate's do: a recount can then only raise the cutoff. A
+        # feed named to trim_feeds --feed can carry a stale Archive count, so it's recounted first.
+        cutoff = feed.story_cutoff
+        stored_counts_are_quiet = feed.active_subscribers <= 0 and not (feed.archive_subscribers or 0) > 0
+        if stored_counts_are_quiet and stored <= cutoff:
+            return 0
+
+        if dryrun:
+            # A dry run writes nothing, so instead of recounting it asks what a recount would find,
+            # then estimates with the counts that recount would store for an abandoned feed.
+            if feed.has_archive_subscriber() or feed.has_reader_within_unread_window():
+                return 0
+            feed.active_subscribers = 0
+            feed.active_premium_subscribers = 0
+            feed.archive_subscribers = 0
+            return max(0, stored - feed.story_cutoff)
+
+        # Stored counts go stale, and an Archive subscriber they missed still needs every story.
+        feed.count_subscribers()
+        if (feed.archive_subscribers or 0) > 0:
+            return 0
+        if feed.has_reader_within_unread_window():
+            return 0
+        return feed.trim_feed()
+
+    def count_fs_size_bytes(self):
+        # This used to BSON-encode every story. With the stories in Postgres the same
+        # question is answered by adding up the text columns after decompressing them
+        # (apps/rss_feeds/models.py).
+        compressed_fields = (
+            "story_content_z",
+            "original_page_z",
+            "original_text_z",
+            "story_latest_content_z",
+            "story_original_content_z",
+        )
+        stories = MStory.objects.filter(story_feed_id=self.pk).only("story_title", *compressed_fields)
+        sum_bytes = 0
+        count = 0
+
+        for story in stories:
+            count += 1
+            story_bytes = len(smart_bytes(story.story_title or ""))
+            for field_name in compressed_fields:
+                compressed = getattr(story, field_name)
+                if not compressed:
+                    continue
+                try:
+                    story_bytes += len(zlib.decompress(compressed))
+                except zlib.error:
+                    story_bytes += len(compressed)
+            sum_bytes += story_bytes
+
+        self.fs_size_bytes = sum_bytes
+        self.archive_count = count
+        self.save()
+
+        return sum_bytes
+
+    # @staticmethod
+    # def clean_invalid_ids():
+    #     history = MFeedFetchHistory.objects(status_code=500, exception__contains='InvalidId:')
+    #     urls = set()
+    #     for h in history:
+    #         u = re.split('InvalidId: (.*?) is not a valid ObjectId\\n$', h.exception)[1]
+    #         urls.add((h.feed_id, u))
+    #
+    #     for f, u in urls:
+    #         print "db.stories.remove({\"story_feed_id\": %s, \"_id\": \"%s\"})" % (f, u)
+
+    def get_stories(
+        self,
+        offset=0,
+        limit=25,
+        order="newest",
+        force=False,
+        date_filter_start=None,
+        date_filter_end=None,
+    ):
+        if order == "oldest":
+            stories_db = MStory.objects(story_feed_id=self.pk).order_by("story_date")
+        else:
+            stories_db = MStory.objects(story_feed_id=self.pk)
+
+        if date_filter_start:
+            stories_db = stories_db.filter(story_date__gte=date_filter_start)
+
+        if date_filter_end:
+            stories_db = stories_db.filter(story_date__lt=date_filter_end)
+
+        if date_filter_start or date_filter_end:
+            start_log = date_filter_start.isoformat() if date_filter_start else ""
+            end_log = date_filter_end.isoformat() if date_filter_end else ""
+            logging.debug(f" ---> ~FBDate filter: start={start_log} end_exclusive={end_log}")
+
+        stories_db = stories_db[offset : offset + limit]
+        stories = self.format_stories(stories_db, self.pk)
+
+        return stories
+
+    @classmethod
+    def find_feed_stories(cls, feed_ids, query, order="newest", offset=0, limit=25, user=None):
+        from apps.rss_feeds import search as story_search
+
+        queryset = MStory.objects(story_feed_id__in=feed_ids)
+        parsed = story_search.parse(query)
+        if parsed.errors:
+            return []
+        if parsed:
+            if user is not None:
+                queryset = story_search.build_queryset(queryset, parsed, user)
+            else:
+                queryset = queryset.filter(story_title__icontains=query)
+        ordering = "-story_date" if order == "newest" else "story_date"
+        stories_db = story_search.filter_story_queryset(
+            queryset, parsed, user, ordering, offset=offset, limit=limit
+        )
+        stories = cls.format_stories(stories_db)
+
+        return stories
+
+    def find_stories(self, query, order="newest", offset=0, limit=25, user=None):
+        from apps.rss_feeds import search as story_search
+
+        queryset = MStory.objects(story_feed_id=self.pk)
+        parsed = story_search.parse(query)
+        if parsed.errors:
+            return []
+        if parsed:
+            if user is not None:
+                queryset = story_search.build_queryset(queryset, parsed, user)
+            else:
+                queryset = queryset.filter(story_title__icontains=query)
+        ordering = "-story_date" if order == "newest" else "story_date"
+        stories_db = story_search.filter_story_queryset(
+            queryset, parsed, user, ordering, offset=offset, limit=limit
+        )
+
+        stories = self.format_stories(stories_db, self.pk)
+
+        return stories
+
+    @classmethod
+    def format_stories(cls, stories_db, feed_id=None, include_permalinks=False):
+        stories = []
+        for story_db in stories_db:
+            story = cls.format_story(story_db, feed_id, include_permalinks=include_permalinks)
+            stories.append(story)
+
+        # Keep the search page metadata attached when the queryset carries it.
+        # Callers that only need a list still get one (SearchResults is a list).
+        if hasattr(stories_db, "truncated"):
+            stories = type(stories_db)(stories)
+            stories.truncated = stories_db.truncated
+            stories.scanned = stories_db.scanned
+
+        return stories
+
+    @classmethod
+    def format_story(cls, story_db, feed_id=None, text=False, include_permalinks=False, show_changes=False):
+        if isinstance(story_db.story_content_z, str):
+            story_db.story_content_z = base64.b64decode(story_db.story_content_z)
+
+        story_content = ""
+        latest_story_content = None
+        has_changes = False
+        if (
+            not show_changes
+            and hasattr(story_db, "story_latest_content_z")
+            and story_db.story_latest_content_z
+        ):
+            try:
+                latest_story_content = smart_str(zlib.decompress(story_db.story_latest_content_z))
+            except DjangoUnicodeDecodeError:
+                latest_story_content = zlib.decompress(story_db.story_latest_content_z)
+        if story_db.story_content_z:
+            story_content = smart_str(zlib.decompress(story_db.story_content_z))
+
+        if "<ins" in story_content or "<del" in story_content:
+            has_changes = True
+        if not show_changes and latest_story_content:
+            story_content = latest_story_content
+        story_title = story_db.story_title
+        blank_story_title = False
+        if not story_title:
+            blank_story_title = True
+            if story_content:
+                story_title = strip_tags(story_content)
+            if not story_title and story_db.story_permalink:
+                story_title = story_db.story_permalink
+            if story_title and len(story_title) > 80:
+                story_title = story_title[:80] + "..."
+            if not story_title:
+                story_title = "Untitled"
+
+        story = {}
+        story["story_hash"] = getattr(story_db, "story_hash", None)
+        story["story_tags"] = story_db.story_tags or []
+        story_date = story_db.story_date or datetime.datetime.now()
+        story["story_date"] = story_date.replace(tzinfo=None)
+        # The browser formats this epoch with its own zone (media/js/newsblur/models/stories.js
+        # formatted_short_date), so it has to be the real UTC epoch and not
+        # strftime("%s"), which reads the naive value as process-local time.
+        story["story_timestamp"] = str(
+            int(calendar.timegm(story_date.utctimetuple()))
+            if story_date.tzinfo is not None
+            else int(calendar.timegm(story_date.timetuple()))
+        )
+        story["story_authors"] = story_db.story_author_name or ""
+        story["story_title"] = story_title
+        if blank_story_title:
+            story["story_title_blank"] = True
+        story["story_content"] = story_content
+        story["story_permalink"] = story_db.story_permalink
+        story["image_urls"] = story_db.image_urls
+        story["secure_image_urls"] = cls.secure_image_urls(story_db.image_urls)
+        story["secure_image_thumbnails"] = cls.secure_image_thumbnails(story_db.image_urls)
+        story["story_feed_id"] = feed_id or story_db.story_feed_id
+        story["has_modifications"] = has_changes
+        story["comment_count"] = story_db.comment_count if hasattr(story_db, "comment_count") else 0
+        story["comment_user_ids"] = story_db.comment_user_ids if hasattr(story_db, "comment_user_ids") else []
+        story["share_count"] = story_db.share_count if hasattr(story_db, "share_count") else 0
+        story["share_user_ids"] = story_db.share_user_ids if hasattr(story_db, "share_user_ids") else []
+        story["guid_hash"] = story_db.guid_hash if hasattr(story_db, "guid_hash") else None
+        if hasattr(story_db, "source_user_id"):
+            story["source_user_id"] = story_db.source_user_id
+        story["id"] = story_db.story_guid or story_db.story_date
+        if hasattr(story_db, "starred_date"):
+            story["starred_date"] = story_db.starred_date
+        if hasattr(story_db, "user_tags"):
+            story["user_tags"] = story_db.user_tags
+        if hasattr(story_db, "user_notes"):
+            story["user_notes"] = story_db.user_notes
+        if hasattr(story_db, "highlights"):
+            story["highlights"] = story_db.highlights
+        if hasattr(story_db, "shared_date"):
+            story["shared_date"] = story_db.shared_date
+        if hasattr(story_db, "comments"):
+            story["comments"] = story_db.comments
+        if hasattr(story_db, "user_id"):
+            story["user_id"] = story_db.user_id
+        if include_permalinks and hasattr(story_db, "blurblog_permalink"):
+            story["blurblog_permalink"] = story_db.blurblog_permalink()
+        if text:
+            soup = BeautifulSoup(story["story_content"], features="lxml")
+            text = "".join(soup.findAll(text=True))
+            text = re.sub(r"\n+", "\n\n", text)
+            text = re.sub(r"\t+", "\t", text)
+            story["text"] = text
+
+        return story
+
+    # Compiled regex for YouTube embed URL matching (used by apply_youtube_captions)
+    YOUTUBE_EMBED_RE = re.compile(
+        r'src=["\']https?://(?:www\.)?(?:youtube\.com|youtube-nocookie\.com)/embed/[^"\']*["\']'
+    )
+
+    @staticmethod
+    def apply_youtube_captions(story_content):
+        """
+        Transform YouTube embed URLs to enable captions by adding cc_load_policy=1.
+        This makes captions show by default when videos are played.
+        """
+        if not story_content:
+            return story_content
+
+        def add_captions_param(match):
+            url = match.group(0)
+            if "cc_load_policy" in url:
+                return url
+            if "?" in url:
+                if url.endswith('"') or url.endswith("'"):
+                    quote = url[-1]
+                    return url[:-1] + "&cc_load_policy=1" + quote
+                return url + "&cc_load_policy=1"
+            else:
+                if url.endswith('"') or url.endswith("'"):
+                    quote = url[-1]
+                    return url[:-1] + "?cc_load_policy=1" + quote
+                return url + "?cc_load_policy=1"
+
+        return Feed.YOUTUBE_EMBED_RE.sub(add_captions_param, story_content)
+
+    @classmethod
+    def secure_image_urls(cls, urls):
+        signed_urls = [
+            create_imageproxy_signed_url(settings.IMAGES_URL, settings.IMAGES_SECRET_KEY, url) for url in urls
+        ]
+        return dict(zip(urls, signed_urls))
+
+    @classmethod
+    def secure_image_thumbnails(cls, urls, size=192):
+        signed_urls = [
+            create_imageproxy_signed_url(settings.IMAGES_URL, settings.IMAGES_SECRET_KEY, url, size)
+            for url in urls
+        ]
+        return dict(zip(urls, signed_urls))
+
+    def get_tags(self, entry):
+        fcat = []
+        if "tags" in entry:
+            for tcat in entry.tags:
+                term = None
+                if hasattr(tcat, "label") and tcat.label:
+                    term = tcat.label
+                elif hasattr(tcat, "term") and tcat.term:
+                    term = tcat.term
+                if not term or "CDATA" in term:
+                    continue
+                qcat = term.strip()
+                if "," in qcat or "/" in qcat:
+                    qcat = qcat.replace(",", "/").split("/")
+                else:
+                    qcat = [qcat]
+                for zcat in qcat:
+                    tagname = zcat.lower()
+                    while "  " in tagname:
+                        tagname = tagname.replace("  ", " ")
+                    tagname = tagname.strip()
+                    if not tagname or tagname == " ":
+                        continue
+                    fcat.append(tagname)
+        fcat = [strip_tags(t)[:250] for t in fcat[:12]]
+        return fcat
+
+    @classmethod
+    def get_permalink(cls, entry):
+        link = entry.get("link")
+        if not link:
+            links = entry.get("links")
+            if links:
+                link = links[0].get("href")
+        if not link:
+            link = entry.get("id")
+        if link:
+            link = cls.resolve_google_redirect_url(link)
+        return link
+
+    @staticmethod
+    def resolve_google_redirect_url(url):
+        """Extract the actual URL from Google redirect URLs.
+
+        Google Alerts (and other Google services) wrap article links in redirect
+        URLs like: https://www.google.com/url?rct=j&sa=t&url=ACTUAL_URL&...
+        These return a JavaScript redirect page rather than an HTTP redirect,
+        so requests/Mercury parser can't follow them. Extract the real URL from
+        the 'url' query parameter instead.
+
+        This runs for every entry on every fetch (get_permalink), so it must never make a
+        network request. Google News article tokens, which need one, are decoded only when
+        a story's text is fetched: see resolve_google_news_article_url.
+        """
+        try:
+            parsed = urllib.parse.urlparse(url)
+            if parsed.hostname in ("www.google.com", "google.com") and parsed.path == "/url":
+                qs = urllib.parse.parse_qs(parsed.query)
+                actual_url = qs.get("url", [None])[0]
+                if actual_url:
+                    return actual_url
+        except Exception:
+            pass
+        return url
+
+    @staticmethod
+    def resolve_google_news_article_url(url):
+        """Decode a Google News story link to the article it points at.
+
+        Google News feeds link every story through
+        https://news.google.com/rss/articles/<token>. Following that from NewsBlur's
+        servers in the EU lands on Google's cookie consent wall rather than the article,
+        and the consent boilerplate was being shown as the story text (forum #13827).
+        Decoding costs up to two HTTP requests (MStory._decode_google_news_url), so only
+        TextImporter calls this, once per original-text fetch; never get_permalink, which
+        runs for every entry on every feed fetch. When the decode endpoint fails, the link
+        is returned untouched and TextImporter refuses the consent page instead
+        (apps/rss_feeds/text_importer.py).
+        """
+        if not is_google_news_url(url):
+            return url
+        try:
+            decoded_url = MStory._decode_google_news_url(url)
+        except Exception:
+            decoded_url = None
+        return decoded_url or url
+
+    def _exists_story(self, story, story_content, existing_stories, new_story_hashes, lightweight=False):
+        story_in_system = None
+        story_has_changed = False
+        story_link = self.get_permalink(story)
+        existing_stories_hashes = list(existing_stories.keys())
+        story_pub_date = story.get("published")
+        # story_published_now = story.get('published_now', False)
+        # start_date = story_pub_date - datetime.timedelta(hours=8)
+        # end_date = story_pub_date + datetime.timedelta(hours=8)
+
+        for existing_story in list(existing_stories.values()):
+            content_ratio = 0
+            # existing_story_pub_date = existing_story.story_date
+
+            if isinstance(existing_story.id, str):
+                # Correcting a MongoDB bug
+                existing_story.story_guid = existing_story.id
+
+            if story.get("story_hash") == existing_story.story_hash:
+                story_in_system = existing_story
+            elif (
+                story.get("story_hash") in existing_stories_hashes
+                and story.get("story_hash") != existing_story.story_hash
+            ):
+                # Story already exists but is not this one
+                continue
+            elif (
+                existing_story.story_hash in new_story_hashes
+                and story.get("story_hash") != existing_story.story_hash
+            ):
+                # Story coming up later
+                continue
+
+            # These were mongoengine field lookups; the columns are plain attributes now.
+            if existing_story.story_latest_content_z:
+                existing_story_content = smart_str(zlib.decompress(existing_story.story_latest_content_z))
+            elif existing_story.story_latest_content:
+                existing_story_content = existing_story.story_latest_content
+            elif existing_story.story_content_z:
+                existing_story_content = smart_str(zlib.decompress(existing_story.story_content_z))
+            elif existing_story.story_content:
+                existing_story_content = existing_story.story_content
+            else:
+                existing_story_content = ""
+
+            # Title distance + content distance, checking if story changed
+            story_title_difference = abs(levenshtein_distance(story.get("title"), existing_story.story_title))
+
+            title_ratio = difflib.SequenceMatcher(
+                None, story.get("title", ""), existing_story.story_title
+            ).ratio()
+            if title_ratio < 0.75:
+                continue
+
+            story_timedelta = existing_story.story_date - story_pub_date
+            # logging.debug('Story pub date: %s %s (%s, %s)' % (existing_story.story_date, story_pub_date, title_ratio, story_timedelta))
+            if abs(story_timedelta.days) >= 2:
+                continue
+
+            seq = difflib.SequenceMatcher(None, story_content, existing_story_content)
+
+            similar_length_min = 1000
+            if existing_story.story_permalink == story_link and existing_story.story_title == story.get(
+                "title"
+            ):
+                similar_length_min = 20
+
+            # Skip content check if already failed due to a timeout. This way we catch titles
+            if lightweight:
+                continue
+
+            if (
+                seq
+                and story_content
+                and len(story_content) > similar_length_min
+                and existing_story_content
+                and seq.real_quick_ratio() > 0.9
+                and seq.quick_ratio() > 0.95
+            ):
+                content_ratio = seq.ratio()
+
+            if story_title_difference > 0 and content_ratio > 0.98:
+                story_in_system = existing_story
+                if story_title_difference > 0 or content_ratio < 1.0:
+                    if settings.DEBUG:
+                        logging.debug(
+                            "   ---> Title difference - %s/%s (%s): %s"
+                            % (
+                                story.get("title"),
+                                existing_story.story_title,
+                                story_title_difference,
+                                content_ratio,
+                            )
+                        )
+                    story_has_changed = True
+                    break
+
+            # More restrictive content distance, still no story match
+            if not story_in_system and content_ratio > 0.98:
+                if settings.DEBUG:
+                    logging.debug(
+                        "   ---> Content difference - %s/%s (%s): %s"
+                        % (
+                            story.get("title"),
+                            existing_story.story_title,
+                            story_title_difference,
+                            content_ratio,
+                        )
+                    )
+                story_in_system = existing_story
+                story_has_changed = True
+                break
+
+            if story_in_system and not story_has_changed:
+                if story_content != existing_story_content:
+                    if settings.DEBUG:
+                        logging.debug(
+                            "   ---> Content difference - %s (%s)/%s (%s)"
+                            % (
+                                story.get("title"),
+                                len(story_content),
+                                existing_story.story_title,
+                                len(existing_story_content),
+                            )
+                        )
+                    story_has_changed = True
+                if story_link != existing_story.story_permalink:
+                    if settings.DEBUG:
+                        logging.debug(
+                            "   ---> Permalink difference - %s/%s"
+                            % (story_link, existing_story.story_permalink)
+                        )
+                    story_has_changed = True
+                # if story_pub_date != existing_story.story_date:
+                #     story_has_changed = True
+                break
+
+        # if story_has_changed or not story_in_system:
+        #     print 'New/updated story: %s' % (story),
+        return story_in_system, story_has_changed
+
+    def has_solo_mega_subscriber(self):
+        """True when this feed's single active subscriber carries more feeds than the
+        Premium limit.
+
+        A mega subscriber (a Pro/Archive user with thousands of feeds) shouldn't put
+        feeds only they read on the fastest fetch schedule: one Pro user importing
+        thousands of YouTube channels can burn the shared YouTube API quota for everyone.
+        Feeds with 2+ active subscribers are never penalized. See
+        apps/rss_feeds/models.py get_next_scheduled_update.
+        """
+        from apps.profile.models import Profile
+        from apps.reader.models import UserSubscription
+
+        if self.active_subscribers != 1:
+            return False
+
+        user_ids = list(
+            UserSubscription.objects.filter(feed=self, active=True).values_list("user_id", flat=True)[:2]
+        )
+        if len(user_ids) != 1:
+            return False
+
+        # Count only active subscriptions, matching how the Premium feed limit is
+        # enforced: muted/inactive rows don't count against a user's limit
+        subscription_count = UserSubscription.objects.filter(user_id=user_ids[0], active=True).count()
+        return subscription_count > Profile.PREMIUM_FEED_LIMIT
+
+    def get_configured_fetch_interval(self):
+        """Minutes between fetches the reader asked for, or None for the popularity decay.
+
+        A per-feed value wins over the reader-wide preference, which in turn wins over
+        the decay formula in get_next_scheduled_update.
+        """
+        if self.fetch_interval:
+            return self.fetch_interval
+        return self.get_global_fetch_interval()
+
+    @classmethod
+    def get_global_fetch_interval(cls):
+        """The reader-wide fetch interval in minutes, or None when it is left on auto.
+
+        The personal edition has exactly one reader, so the first profile holds the
+        preference. It is stored in Profile.preferences["fetch_interval"] by
+        apps/profile/views.py set_preference.
+        """
+        from apps.profile.models import Profile
+
+        preferences = Profile.objects.values_list("preferences", flat=True).first()
+        if not preferences:
+            return None
+        try:
+            interval = json.decode(preferences).get("fetch_interval")
+        except ValueError:
+            return None
+        try:
+            interval = int(interval)
+        except (TypeError, ValueError):
+            return None
+        return interval if interval > 0 else None
+
+    def get_next_scheduled_update(self, force=False, verbose=True, premium_speed=False, pro_speed=False):
+        # A reader-set interval replaces both the cached decay and the popularity
+        # formula: on a single-reader instance their choice is the truth.
+        configured_interval = self.get_configured_fetch_interval()
+        if configured_interval and not (premium_speed or pro_speed):
+            if verbose:
+                logging.debug(
+                    "   ---> [%-30s] Using reader-set fetch interval: %s min"
+                    % (self.log_title[:30], configured_interval)
+                )
+            return configured_interval
+
+        if self.min_to_decay and not force and not premium_speed:
+            if verbose:
+                logging.debug(
+                    "   ---> [%-30s] Using cached min_to_decay: %s min"
+                    % (self.log_title[:30], self.min_to_decay)
+                )
+            return self.min_to_decay
+
+        if premium_speed:
+            self.active_premium_subscribers += 1
+        if pro_speed:
+            self.pro_subscribers += 1
+
+        spd = self.stories_last_month / 30.0
+        # Weighted subscriber calculation: premium users count fully, regular users count as 1/10
+        subs = self.active_premium_subscribers + (
+            (self.active_subscribers - self.active_premium_subscribers) / 10.0
+        )
+        if verbose:
+            logging.debug(
+                "   ---> [%-30s] ~FBWeighted subscriber calculation:~SN %.1f = %s premium + (%s-%s)/10 regular"
+                % (
+                    self.log_title[:30],
+                    subs,
+                    self.active_premium_subscribers,
+                    self.active_subscribers,
+                    self.active_premium_subscribers,
+                )
+            )
+        # Calculate sub counts:
+        #   SELECT COUNT(*) FROM feeds WHERE active_premium_subscribers > 10 AND stories_last_month >= 30;
+        #   SELECT COUNT(*) FROM feeds WHERE active_premium_subscribers > 1 AND active_premium_subscribers < 10 AND stories_last_month >= 30;
+        #   SELECT COUNT(*) FROM feeds WHERE active_premium_subscribers = 1 AND stories_last_month >= 30;
+        # SpD > 1  Subs > 10: t = 6         # 4267   * 1440/6  =      1024080
+        # SpD > 1  Subs > 1:  t = 15        # 18973  * 1440/15 =      1821408
+        # SpD > 1  Subs = 1:  t = 60        # 65503  * 1440/60 =      1572072
+        #   SELECT COUNT(*) FROM feeds WHERE active_premium_subscribers > 1 AND stories_last_month < 30 AND stories_last_month > 0;
+        #   SELECT COUNT(*) FROM feeds WHERE active_premium_subscribers = 1 AND stories_last_month < 30 AND stories_last_month > 0;
+        # SpD < 1  Subs > 1:  t = 60        # 77618  * 1440/60 =      1862832
+        # SpD < 1  Subs = 1:  t = 60 * 12   # 282186 * 1440/(60*12) = 564372
+        #   SELECT COUNT(*) FROM feeds WHERE active_premium_subscribers > 1 AND stories_last_month = 0;
+        #   SELECT COUNT(*) FROM feeds WHERE active_subscribers > 0 AND active_premium_subscribers <= 1 AND stories_last_month = 0;
+        # SpD = 0  Subs > 1:  t = 60 * 3    # 30158  * 1440/(60*3) =  241264
+        # SpD = 0  Subs = 1:  t = 60 * 24   # 514131 * 1440/(60*24) = 514131
+        if spd >= 1:
+            if subs >= 10:
+                total = 6
+                decay_reason = "High activity: >=1 story/day, >=10 weighted subs"
+            elif subs > 1:
+                total = 15
+                decay_reason = "Good activity: >=1 story/day, >1 weighted subs"
+            else:
+                total = 45
+                decay_reason = "Moderate activity: >=1 story/day, <=1 weighted subs"
+        elif spd > 0:
+            if subs > 1:
+                total = 60 - (spd * 60)
+                decay_reason = (
+                    "Low activity: <1 story/day (%.2f), >1 weighted subs, formula: 60-(%.2f*60)=%.1f"
+                    % (spd, spd, total)
+                )
+            else:
+                total = 60 * 6 - (spd * 60 * 6)
+                decay_reason = (
+                    "Very low activity: <1 story/day (%.2f), <=1 weighted subs, formula: 360-(%.2f*360)=%.1f"
+                    % (spd, spd, total)
+                )
+        elif spd == 0:
+            if subs > 1:
+                total = 60 * 6
+                decay_reason = "No stories: 0 stories/month, >1 weighted subs"
+            elif subs == 1:
+                total = 60 * 12
+                decay_reason = "No stories: 0 stories/month, =1 weighted subs"
+            else:
+                total = 60 * 24
+                decay_reason = "No stories: 0 stories/month, <1 weighted subs"
+            months_since_last_story = seconds_timesince(self.last_story_date) / (60 * 60 * 24 * 30)
+            total *= max(1, months_since_last_story)
+            if months_since_last_story > 1:
+                decay_reason += ", multiplied by %.1f months since last story" % months_since_last_story
+
+        if verbose:
+            logging.debug(
+                "   ---> [%-30s] ~FBBase decay calculation:~SN %s min - %s"
+                % (self.log_title[:30], total, decay_reason)
+            )
+        # updates_per_day_delay = 3 * 60 / max(.25, ((max(0, self.active_subscribers)**.2)
+        #                                             * (self.stories_last_month**0.25)))
+        # if self.active_premium_subscribers > 0:
+        #     updates_per_day_delay /= min(self.active_subscribers+self.active_premium_subscribers, 4)
+        # updates_per_day_delay = int(updates_per_day_delay)
+
+        # Lots of subscribers = lots of updates
+        # 24 hours for 0 subscribers.
+        # 4 hours for 1 subscriber.
+        # .5 hours for 2 subscribers.
+        # .25 hours for 3 subscribers.
+        # 1 min for 10 subscribers.
+        # subscriber_bonus = 6 * 60 / max(.167, max(0, self.active_subscribers)**3)
+        # if self.premium_subscribers > 0:
+        #     subscriber_bonus /= min(self.active_subscribers+self.premium_subscribers, 5)
+        # subscriber_bonus = int(subscriber_bonus)
+
+        adjustments = []
+
+        if self.is_push:
+            fetch_history = MFetchHistory.feed(self.pk)
+            if len(fetch_history["push_history"]):
+                before_push = total
+                total = total * 12
+                adjustments.append("Push feed penalty: %s min -> %s min (x12)" % (before_push, total))
+
+        # 4 hour max for premiums, 48 hour max for free
+        if subs >= 1:
+            before_cap = total
+            total = min(total, 60 * 4 * 1)
+            if before_cap != total:
+                adjustments.append(
+                    "Premium cap: %s min -> %s min (4 hour max with %.1f weighted subs)"
+                    % (before_cap, total, subs)
+                )
+        else:
+            before_cap = total
+            total = min(total, 60 * 24 * 2)
+            if before_cap != total:
+                adjustments.append("Free cap: %s min -> %s min (48 hour max)" % (before_cap, total))
+
+        # Craigslist feeds get 6 hours minimum
+        if "craigslist" in self.feed_address:
+            before_cl = total
+            total = max(total, 60 * 6)
+            if before_cl != total:
+                adjustments.append("Craigslist minimum: %s min -> %s min (6 hour min)" % (before_cl, total))
+
+        # Twitter feeds get 2 hours minimum
+        if "twitter" in self.feed_address:
+            before_tw = total
+            total = max(total, 60 * 2)
+            if before_tw != total:
+                adjustments.append("Twitter minimum: %s min -> %s min (2 hour min)" % (before_tw, total))
+
+        # Pro subscribers get absolute minimum
+        if self.pro_subscribers and self.pro_subscribers >= 1:
+            before_pro = total
+            if self.stories_last_month == 0:
+                total = min(total, 60 * 3)
+                if before_pro != total:
+                    adjustments.append(
+                        "Pro boost (no stories): %s min -> %s min (180 min max for %s pro subs)"
+                        % (before_pro, total, self.pro_subscribers)
+                    )
+            else:
+                total = min(total, settings.PRO_MINUTES_BETWEEN_FETCHES)
+                if before_pro != total:
+                    adjustments.append(
+                        "Pro boost: %s min -> %s min (%s min max for %s pro subs)"
+                        % (before_pro, total, settings.PRO_MINUTES_BETWEEN_FETCHES, self.pro_subscribers)
+                    )
+
+        # YouTube feeds whose single subscriber is a mega subscriber (more feeds
+        # than the Premium limit) get 4 fetches/day max, overriding the Pro boost:
+        # bulk YouTube imports would otherwise burn the shared YouTube API quota
+        # for everyone. Feeds with 2+ subscribers are never penalized.
+        if total < 60 * 6 and is_youtube_feed_address(self.feed_address) and self.has_solo_mega_subscriber():
+            before_mega = total
+            total = 60 * 6
+            adjustments.append(
+                "Solo mega subscriber YouTube floor: %s min -> %s min (4 fetches/day max)"
+                % (before_mega, total)
+            )
+
+        # Forbidden feeds fail every fetch, so back off by audience size instead of
+        # retrying a blocked site every few minutes.
+        if self.is_forbidden:
+            before_forbidden = total
+            if self.num_subscribers > 1000:
+                hours = 3
+            elif self.num_subscribers > 100:
+                hours = 6
+            elif self.num_subscribers > 1:
+                hours = 12
+            else:
+                # Most forbidden feeds have exactly one subscriber; a blocked site isn't
+                # worth retrying more than once a day.
+                hours = 24
+            total = max(total, hours * 60)
+            if before_forbidden != total:
+                adjustments.append(
+                    "Forbidden penalty: %s min -> %s min (%s hour min for %s subs)"
+                    % (before_forbidden, total, hours, self.num_subscribers)
+                )
+
+        if verbose and adjustments:
+            logging.debug(
+                "   ---> [%-30s] ~FBDecay adjustments applied:~SN\n         %s"
+                % (self.log_title[:30], "\n         ".join(adjustments))
+            )
+
+        if verbose:
+            logging.debug(
+                "   ---> [%-30s] Fetched every %s min - Subs: %s/%s/%s/%s/%s Stories/day: %s"
+                % (
+                    self.log_title[:30],
+                    total,
+                    self.num_subscribers,
+                    self.active_subscribers,
+                    self.active_premium_subscribers,
+                    self.archive_subscribers,
+                    self.pro_subscribers,
+                    spd,
+                )
+            )
+        return total
+
+    def defer_next_fetch(self, delay_sec=None):
+        """Bring the next fetch forward by delay_sec and keep it there through the scheduling
+        calls that follow this fetch (update_all_statistics, and Feed.update's own
+        set_next_scheduled_update after the dispatcher returns), which would otherwise put
+        the feed back on its normal interval. Used when a batch could not be stored under
+        the feed's lock, or only partly. The marker lives exactly as long as the deferral,
+        so the deferred fetch itself schedules normally. apps/rss_feeds/models.py"""
+        if delay_sec is None:
+            delay_sec = FETCH_LOCK_DEFERRAL_SECONDS
+        r = redis.Redis(connection_pool=settings.REDIS_FEED_UPDATE_POOL)
+        r.setex(FETCH_DEFERRAL_KEY % self.pk, delay_sec, delay_sec)
+        self.set_next_scheduled_update(delay_fetch_sec=delay_sec)
+
+    def pending_fetch_deferral(self, r):
+        """The deferral defer_next_fetch left for this feed, in seconds, or None."""
+        try:
+            return int(r.get(FETCH_DEFERRAL_KEY % self.pk))
+        except (TypeError, ValueError):
+            return None
+
+    def slow_fetch_interval_for_muted_readers(self, minutes_until_next_fetch):
+        """Stretch the next fetch for a feed whose subscriptions are all muted.
+
+        The feed keeps warming on a slow cadence so unmuting does not open on a
+        hole, but it stops costing one fetch per interval for nobody. Unmuting
+        sets active=True again and the next fetch returns to normal.
+        apps/rss_feeds/models.py"""
+        muted_minutes = getattr(settings, "MUTED_FEED_FETCH_MINUTES", 360)
+        if muted_minutes and minutes_until_next_fetch < muted_minutes:
+            if not self.has_unmuted_subscriber():
+                return muted_minutes
+        return minutes_until_next_fetch
+
+    def has_unmuted_subscriber(self):
+        """True when at least one reader still has this feed unmuted.
+
+        A muted subscription stays in the database, so active_subscribers alone
+        cannot tell a feed nobody reads from one with an audience.
+        apps/rss_feeds/models.py"""
+        return self.subscribers.filter(active=True).exists()
+
+    def set_next_scheduled_update(self, verbose=False, skip_scheduling=False, delay_fetch_sec=None):
+        r = redis.Redis(connection_pool=settings.REDIS_FEED_UPDATE_POOL)
+        if delay_fetch_sec is None:
+            # A fetch deferred for the feed's lock must stay deferred through every
+            # scheduling call that follows it in the same run (see defer_next_fetch).
+            delay_fetch_sec = self.pending_fetch_deferral(r)
+
+        # Use Cache-Control max-age or Retry-After if provided
+        if delay_fetch_sec is not None:
+            minutes_until_next_fetch = delay_fetch_sec / 60
+            base_total = minutes_until_next_fetch
+            if verbose:
+                logging.debug(
+                    "   ---> [%-30s] ~FBScheduling feed fetch using cache-control: "
+                    "~SB%s minutes" % (self.log_title[:30], minutes_until_next_fetch)
+                )
+        else:
+            # Log subscriber counts for debugging
+            if verbose:
+                spd = self.stories_last_month / 30.0
+                months_since_last_story = (
+                    seconds_timesince(self.last_story_date) / (60 * 60 * 24 * 30)
+                    if self.last_story_date
+                    else 999
+                )
+
+                logging.debug(
+                    "   ---> [%-30s] ~FBCalculating decay time with:~SN\n"
+                    "         Subscribers: total=%s, active=%s, active_premium=%s, pro=%s, archive=%s\n"
+                    "         Stories: last_month=%s (%.2f/day), last_story_date=%s (%.1f months ago)\n"
+                    "         State: is_push=%s, is_forbidden=%s, errors_since_good=%s"
+                    % (
+                        self.log_title[:30],
+                        self.num_subscribers,
+                        self.active_subscribers,
+                        self.active_premium_subscribers,
+                        self.pro_subscribers,
+                        self.archive_subscribers,
+                        self.stories_last_month,
+                        spd,
+                        self.last_story_date,
+                        months_since_last_story,
+                        self.is_push,
+                        self.is_forbidden,
+                        self.errors_since_good,
+                    )
+                )
+
+            minutes_until_next_fetch = self.get_next_scheduled_update(force=True, verbose=verbose)
+            base_total = minutes_until_next_fetch
+            error_count = self.error_count
+
+            # Handle 429 rate limiting - enforce minimum 60 minute backoff
+            if self.exception_code == 429:
+                minutes_until_next_fetch = max(minutes_until_next_fetch, 60)
+                if verbose:
+                    logging.debug(
+                        "   ---> [%-30s] ~FY429 Rate Limited - enforcing minimum 60 min backoff"
+                        % (self.log_title[:30])
+                    )
+            elif error_count:
+                original_total = minutes_until_next_fetch
+                minutes_until_next_fetch = minutes_until_next_fetch * error_count
+                minutes_until_next_fetch = min(minutes_until_next_fetch, 60 * 24 * 7)
+                if verbose:
+                    logging.debug(
+                        "   ---> [%-30s] ~FBScheduling feed fetch geometrically: "
+                        "~SB%s errors (errors_since_good=%s + redis_errors). Time adjusted from %s to %s min"
+                        % (
+                            self.log_title[:30],
+                            error_count,
+                            self.errors_since_good,
+                            original_total,
+                            minutes_until_next_fetch,
+                        )
+                    )
+
+        if delay_fetch_sec is None:
+            minutes_until_next_fetch = self.slow_fetch_interval_for_muted_readers(minutes_until_next_fetch)
+
+        random_factor = random.randint(0, int(minutes_until_next_fetch)) / 4
+        if minutes_until_next_fetch <= 5:
+            # 5 min fetches should be between 5 and 10 minutes
+            random_factor = random.randint(0, int(minutes_until_next_fetch))
+        if delay_fetch_sec is None and self.get_configured_fetch_interval():
+            # A reader-set interval repeats exactly, which used to mean every
+            # feed on the same cadence came due in the same second. Keep the
+            # cadence but give each feed a stable slot inside the first fifth of
+            # its interval; see apps/rss_feeds/scheduling.py.
+            random_factor = phase_offset_minutes(self.pk, minutes_until_next_fetch)
+
+        if verbose and delay_fetch_sec is None:
+            logging.debug(
+                "   ---> [%-30s] ~FBFinal decay calculation:~SN base=%s min, with_errors=%s min, random_factor=%.1f min"
+                % (self.log_title[:30], base_total, minutes_until_next_fetch, random_factor)
+            )
+
+            # Explain why this specific time was chosen
+            reasons = []
+            if self.active_premium_subscribers >= 1:
+                reasons.append("has %s active premium subscriber(s)" % self.active_premium_subscribers)
+            if self.pro_subscribers >= 1:
+                reasons.append("has %s pro subscriber(s)" % self.pro_subscribers)
+            if self.is_push:
+                reasons.append("is push feed")
+            if self.is_forbidden:
+                reasons.append("is forbidden (rate limited)")
+            if error_count > 0:
+                reasons.append("has %s error(s)" % error_count)
+            if self.stories_last_month == 0:
+                reasons.append("no stories in last month")
+
+            if reasons:
+                logging.debug(
+                    "   ---> [%-30s] ~FBReasons for %s min decay:~SN %s"
+                    % (self.log_title[:30], minutes_until_next_fetch, ", ".join(reasons))
+                )
+
+        next_scheduled_update = datetime.datetime.utcnow() + datetime.timedelta(
+            minutes=minutes_until_next_fetch + random_factor
+        )
+        original_min_to_decay = self.min_to_decay
+        self.min_to_decay = minutes_until_next_fetch
+
+        delta = self.next_scheduled_update - datetime.datetime.now()
+        minutes_to_next_fetch_current = (delta.seconds + (delta.days * 24 * 3600)) / 60
+        if minutes_to_next_fetch_current > self.min_to_decay or not skip_scheduling:
+            self.next_scheduled_update = next_scheduled_update
+            if self.active_subscribers >= 1:
+                r.zadd("scheduled_updates", {self.pk: self.next_scheduled_update.strftime("%s")})
+            r.zrem("tasked_feeds", self.pk)
+            r.srem("queued_feeds", self.pk)
+
+            if verbose:
+                logging.debug(
+                    "   ---> [%-30s] ~FBScheduled next update for:~SN %s (in %.1f min)"
+                    % (self.log_title[:30], next_scheduled_update, minutes_until_next_fetch + random_factor)
+                )
+
+        updated_fields = ["last_update", "next_scheduled_update"]
+        if self.min_to_decay != original_min_to_decay:
+            updated_fields.append("min_to_decay")
+        self.save(update_fields=updated_fields)
+
+    @property
+    def error_count(self):
+        r = redis.Redis(connection_pool=settings.REDIS_FEED_UPDATE_POOL)
+        fetch_errors = int(r.zscore("error_feeds", self.pk) or 0)
+
+        return fetch_errors + self.errors_since_good
+
+    def schedule_feed_fetch_immediately(self, verbose=True):
+        r = redis.Redis(connection_pool=settings.REDIS_FEED_UPDATE_POOL)
+        if not self.num_subscribers:
+            logging.debug(
+                "   ---> [%-30s] Not scheduling feed fetch immediately, no subs." % (self.log_title[:30])
+            )
+            return self
+
+        if verbose:
+            logging.debug("   ---> [%-30s] Scheduling feed fetch immediately..." % (self.log_title[:30]))
+
+        self.next_scheduled_update = datetime.datetime.utcnow()
+        r.zadd("scheduled_updates", {self.pk: self.next_scheduled_update.strftime("%s")})
+        # A manual refresh is a reader waiting on the page, so it also jumps the
+        # per minute tasking budget (apps/rss_feeds/scheduling.py).
+        r.sadd("priority_feeds", self.pk)
+
+        return self.save()
+
+    # def calculate_collocations_story_content(self,
+    #                                          collocation_measures=TrigramAssocMeasures,
+    #                                          collocation_finder=TrigramCollocationFinder):
+    #     stories = MStory.objects.filter(story_feed_id=self.pk)
+    #     story_content = ' '.join([s.story_content for s in stories if s.story_content])
+    #     return self.calculate_collocations(story_content, collocation_measures, collocation_finder)
+    #
+    # def calculate_collocations_story_title(self,
+    #                                        collocation_measures=BigramAssocMeasures,
+    #                                        collocation_finder=BigramCollocationFinder):
+    #     stories = MStory.objects.filter(story_feed_id=self.pk)
+    #     story_titles = ' '.join([s.story_title for s in stories if s.story_title])
+    #     return self.calculate_collocations(story_titles, collocation_measures, collocation_finder)
+    #
+    # def calculate_collocations(self, content,
+    #                            collocation_measures=TrigramAssocMeasures,
+    #                            collocation_finder=TrigramCollocationFinder):
+    #     content = re.sub(r'&#8217;', '\'', content)
+    #     content = re.sub(r'&amp;', '&', content)
+    #     try:
+    #         content = unicode(BeautifulStoneSoup(content,
+    #                           convertEntities=BeautifulStoneSoup.HTML_ENTITIES))
+    #     except ValueError, e:
+    #         print "ValueError, ignoring: %s" % e
+    #     content = re.sub(r'</?\w+\s+[^>]*>', '', content)
+    #     content = re.split(r"[^A-Za-z-'&]+", content)
+    #
+    #     finder = collocation_finder.from_words(content)
+    #     finder.apply_freq_filter(3)
+    #     best = finder.nbest(collocation_measures.pmi, 10)
+    #     phrases = [' '.join(phrase) for phrase in best]
+    #
+    #     return phrases
+
+
+# class FeedCollocations(models.Model):
+#     feed = models.ForeignKey(Feed)
+#     phrase = models.CharField(max_length=500)
+
+
+class StoryFilter(models.Model):
+    """A per-reader rule that runs on every new story as it is fetched.
+
+    MStory rows are shared by every subscriber, so no action here deletes a story.
+    Marking read, starring and tagging are per-reader state; "hide" is mark-read
+    without ever counting the story as unread. Rules are scoped to one feed, to a
+    folder, or to every feed the reader is subscribed to (apps/rss_feeds/filters.py
+    does the matching and the applying).
+    """
+
+    SCOPE_FEED = "feed"
+    SCOPE_FOLDER = "folder"
+    SCOPE_GLOBAL = "global"
+    SCOPE_CHOICES = [
+        (SCOPE_FEED, "This site"),
+        (SCOPE_FOLDER, "A folder"),
+        (SCOPE_GLOBAL, "All sites"),
+    ]
+
+    FIELD_ANY = "any"
+    FIELD_CHOICES = [
+        (FIELD_ANY, "Title, author, body or URL"),
+        ("title", "Title"),
+        ("author", "Author"),
+        ("content", "Story body"),
+        ("url", "URL"),
+    ]
+
+    ACTION_MARK_READ = "mark_read"
+    ACTION_STAR = "star"
+    ACTION_TAG = "tag"
+    ACTION_HIDE = "hide"
+    ACTION_CHOICES = [
+        (ACTION_MARK_READ, "Mark as read"),
+        (ACTION_STAR, "Save (star)"),
+        (ACTION_TAG, "Tag"),
+        (ACTION_HIDE, "Hide (never unread)"),
+    ]
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="story_filters")
+    scope = models.CharField(max_length=8, choices=SCOPE_CHOICES, default=SCOPE_FEED)
+    feed = models.ForeignKey(
+        Feed, null=True, blank=True, on_delete=models.CASCADE, related_name="story_filters"
+    )
+    folder = models.CharField(max_length=255, blank=True, default="")
+    field = models.CharField(max_length=8, choices=FIELD_CHOICES, default=FIELD_ANY)
+    pattern = models.CharField(max_length=255)
+    is_regex = models.BooleanField(default=False)
+    case_sensitive = models.BooleanField(default=False)
+    action = models.CharField(max_length=12, choices=ACTION_CHOICES, default=ACTION_MARK_READ)
+    tag = models.CharField(max_length=64, blank=True, default="")
+    enabled = models.BooleanField(default=True)
+    hits = models.IntegerField(default=0)
+    created = models.DateTimeField(auto_now_add=True)
+    updated = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "story_filters"
+        ordering = ["scope", "feed_id", "id"]
+        indexes = [
+            models.Index(fields=["user", "enabled"], name="story_filters_user_enabled_idx"),
+            models.Index(fields=["feed"], name="story_filters_feed_idx"),
+        ]
+
+    def __str__(self):
+        target = self.feed_id if self.scope == self.SCOPE_FEED else (self.folder or "all sites")
+        return "%s: %s %s %s -> %s" % (
+            self.user_id,
+            self.scope,
+            target,
+            self.pattern,
+            self.action,
+        )
+
+    def clean(self):
+        if self.scope == self.SCOPE_FEED and not self.feed_id:
+            raise ValidationError("A site rule needs a site.")
+        if self.scope == self.SCOPE_FOLDER and not self.folder:
+            raise ValidationError("A folder rule needs a folder name.")
+        if self.action == self.ACTION_TAG and not self.tag:
+            raise ValidationError("A tag rule needs a tag name.")
+
+
+class FeedData(models.Model):
+    feed = AutoOneToOneField(Feed, related_name="data", on_delete=models.CASCADE)
+    feed_tagline = models.CharField(max_length=1024, blank=True, null=True)
+    story_count_history = models.TextField(blank=True, null=True)
+    feed_classifier_counts = models.TextField(blank=True, null=True)
+    popular_tags = models.CharField(max_length=1024, blank=True, null=True)
+    popular_authors = models.CharField(max_length=2048, blank=True, null=True)
+
+    def save(self, *args, **kwargs):
+        if self.feed_tagline and len(self.feed_tagline) >= 1000:
+            self.feed_tagline = self.feed_tagline[:1000]
+
+        try:
+            super(FeedData, self).save(*args, **kwargs)
+        except (IntegrityError, OperationError):
+            if hasattr(self, "id") and self.id:
+                self.delete()
+        except DatabaseError as e:
+            # Nothing updated
+            logging.debug(" ---> ~FRNothing updated in FeedData (%s): %s" % (self.feed, e))
+
+
+class MFeedIcon(LegacyDocument):
+    feed_id = models.IntegerField(primary_key=True)  # feed id is the natural key
+    color = models.CharField(max_length=6, null=True, blank=True)
+    data = models.TextField(null=True, blank=True)
+    icon_url = models.TextField(null=True, blank=True)
+    not_found = models.BooleanField(default=False)
+    # The feed's self-declared <icon> URL that apps/rss_feeds/icon_importer.py last
+    # resolved or attempted, so a broken/undecodable declared icon is not refetched
+    # on every poll. Mongo is schemaless, so adding this needs no migration.
+    declared_source_url = models.TextField(null=True, blank=True)
+
+    class Meta:
+        db_table = "feed_icons"
+
+    @classmethod
+    def get_feed(cls, feed_id, create=True):
+        try:
+            feed_icon = cls.objects.read_preference().get(feed_id=feed_id)
+        except cls.DoesNotExist:
+            if create:
+                feed_icon = cls.objects.create(feed_id=feed_id)
+            else:
+                feed_icon = None
+
+        return feed_icon
+
+    def save(self, *args, **kwargs):
+        if self.icon_url:
+            self.icon_url = str(self.icon_url)
+        try:
+            return super(MFeedIcon, self).save(*args, **kwargs)
+        except (IntegrityError, OperationError):
+            # A duplicate feed id is the only expected failure here; the row already holds the icon.
+            return None
+
+
+class MFeedPage(LegacyDocument):
+    feed_id = models.IntegerField(primary_key=True)  # feed id is the natural key
+    page_data = models.BinaryField(null=True, blank=True)
+
+    class Meta:
+        db_table = "feed_pages"
+
+    def page(self):
+        try:
+            return zlib.decompress(self.page_data)
+        except zlib.error as e:
+            logging.debug(" ***> Zlib decompress error: %s" % e)
+            self.page_data = None
+            self.save()
+            return
+
+    @classmethod
+    def get_data(cls, feed_id):
+        data = None
+        feed_page = cls.objects(feed_id=feed_id)
+        if feed_page:
+            page_data_z = feed_page[0].page_data
+            if page_data_z:
+                try:
+                    data = zlib.decompress(page_data_z)
+                except zlib.error as e:
+                    logging.debug(" ***> Zlib decompress error: %s" % e)
+                    feed_page.page_data = None
+                    feed_page.save()
+                    return
+
+        if not data:
+            dupe_feed = DuplicateFeed.objects.filter(duplicate_feed_id=feed_id)
+            if dupe_feed:
+                feed = dupe_feed[0].feed
+                feed_page = MFeedPage.objects.filter(feed_id=feed.pk)
+                if feed_page:
+                    page_data_z = feed_page[0].page_data
+                    if page_data_z:
+                        data = zlib.decompress(feed_page[0].page_data)
+
+        return data
+
+
+class MStory(LegacyDocument):
+    """A feed item"""
+
+    story_feed_id = models.IntegerField(null=True, blank=True)
+    story_date = models.DateTimeField(null=True, blank=True)
+    story_title = models.CharField(max_length=1024, null=True, blank=True)
+    story_content = models.TextField(null=True, blank=True)
+    story_content_z = models.BinaryField(null=True, blank=True)
+    story_original_content = models.TextField(null=True, blank=True)
+    story_original_content_z = models.BinaryField(null=True, blank=True)
+    story_latest_content = models.TextField(null=True, blank=True)
+    story_latest_content_z = models.BinaryField(null=True, blank=True)
+    original_text_z = models.BinaryField(null=True, blank=True)
+    original_page_z = models.BinaryField(null=True, blank=True)
+    story_content_type = models.CharField(max_length=255, null=True, blank=True)
+    story_author_name = models.TextField(null=True, blank=True)
+    story_permalink = models.TextField(null=True, blank=True)
+    story_guid = models.TextField(null=True, blank=True)
+    story_hash = models.TextField(null=True, blank=True)
+    # Plain text extracted from the body for substring search. Nullable so the
+    # migration can add it to a live table without rewriting every row; the
+    # backfill command fills old stories and save() keeps new ones current.
+    story_text = models.TextField(null=True, blank=True)
+    newsletter_headers = models.JSONField(default=dict, blank=True)
+    newsletter_identity = models.TextField(null=True, blank=True)
+    newsletter_identity_source = models.CharField(max_length=64, null=True, blank=True)
+    image_urls = models.JSONField(default=list, blank=True)
+    story_tags = models.JSONField(default=list, blank=True)
+    comment_count = models.IntegerField(null=True, blank=True)
+    comment_user_ids = models.JSONField(default=list, blank=True)
+    share_count = models.IntegerField(null=True, blank=True)
+    share_user_ids = models.JSONField(default=list, blank=True)
+    cluster_checked = models.BooleanField(default=False)
+
+    class Meta:
+        db_table = "stories"
+        ordering = ['-story_date']
+        indexes = [
+            models.Index(fields=['story_feed_id', '-story_date']),
+            # Django compiles icontains to UPPER(story_text) LIKE UPPER(...), so
+            # migration 0007 creates the real trigram index on UPPER(story_text)
+            # with raw SQL. This declaration keeps migration state in sync; the
+            # database index has the same name but is an expression index.
+            GinIndex(
+                fields=['story_text'],
+                name='stories_story_text_trgm',
+                opclasses=['gin_trgm_ops'],
+            ),
+        ]
+        constraints = [
+            models.UniqueConstraint(fields=['story_hash'], name='uniq_stories_story_hash'),
+        ]
+
+    RE_STORY_HASH = re.compile(r"^(\d{1,10}):(\w{6})$")
+    RE_RS_KEY = re.compile(r"^RS:(\d+):(\d+)$")
+
+    def __str__(self):
+        content_size = len(self.story_content_z) if self.story_content_z else 0
+        return f"{self.story_hash}: {(self.story_title or '')[:20]} ({content_size} bytes)"
+
+    @property
+    def guid_hash(self):
+        return hashlib.sha1((self.story_guid).encode(encoding="utf-8")).hexdigest()[:6]
+
+    @classmethod
+    def guid_hash_unsaved(self, guid):
+        return hashlib.sha1(guid.encode(encoding="utf-8")).hexdigest()[:6]
+
+    @property
+    def feed_guid_hash(self):
+        return "%s:%s" % (self.story_feed_id, self.guid_hash)
+
+    @classmethod
+    def feed_guid_hash_unsaved(cls, feed_id, guid):
+        return "%s:%s" % (feed_id, cls.guid_hash_unsaved(guid))
+
+    @property
+    def story_content_str(self):
+        story_content = self.story_content
+        if story_content:
+            return smart_str(story_content)
+        if not self.story_content_z:
+            return ""
+        try:
+            return smart_str(zlib.decompress(self.story_content_z))
+        except (zlib.error, TypeError, ValueError):
+            # A truncated or corrupt compressed row must not take down a search,
+            # a feed render, or the reader page. Treat it as empty text.
+            return ""
+
+    def truncate_oversized_content(self):
+        """
+        Cap every large text field at MAX_STORY_CONTENT_BYTES so the story can't grow
+        past Mongo's 16MB document limit.
+
+        The plain fields are capped here, before save() compresses them. The page and
+        text importers hand their fields over already compressed, so those are only
+        unpacked when the stored blob is itself over the cap — a page that compresses
+        down small is left alone no matter how large it started.
+        """
+        for field_name in ("story_content", "story_original_content", "story_latest_content"):
+            content = getattr(self, field_name)
+            if not content:
+                continue
+            content_bytes = smart_bytes(content)
+            if len(content_bytes) <= MAX_STORY_CONTENT_BYTES:
+                continue
+            logging.debug(
+                "   ---> ~SN~FRTruncating oversized %s on story %s: %s bytes"
+                % (field_name, self.story_hash, len(content_bytes))
+            )
+            setattr(self, field_name, truncate_story_content(content_bytes))
+
+        for field_name in ("original_text_z", "original_page_z"):
+            compressed = getattr(self, field_name)
+            if not compressed or len(compressed) <= MAX_STORY_CONTENT_BYTES:
+                continue
+            logging.debug(
+                "   ---> ~SN~FRTruncating oversized %s on story %s: %s compressed bytes"
+                % (field_name, self.story_hash, len(compressed))
+            )
+            truncated = truncate_story_content(zlib.decompress(compressed))
+            setattr(self, field_name, zlib.compress(smart_bytes(truncated)))
+
+    def save(self, *args, **kwargs):
+        story_title_max = MStory._meta.get_field("story_title").max_length
+        story_content_type_max = MStory._meta.get_field("story_content_type").max_length
+        self.story_hash = self.feed_guid_hash
+
+        self.truncate_oversized_content()
+
+        self.extract_image_urls()
+
+        # Keep the search column current in the same write as the compressed body.
+        # story_latest_content holds the full current article on an update, while
+        # story_content holds the diff, so prefer the former when both are present.
+        old_story_text = self.story_text
+        update_fields = kwargs.get("update_fields")
+        search_content = self.story_latest_content or self.story_content
+        if search_content:
+            self.story_text = story_text_for_search(search_content)
+        elif self._state.adding or not self.story_text or (
+            update_fields and "story_content_z" in update_fields
+        ):
+            # Importers and tests can write the compressed column directly.
+            self.story_text = story_text_for_search(self.story_content_str)
+        if update_fields is not None and self.story_text != old_story_text:
+            kwargs["update_fields"] = set(update_fields) | {"story_text"}
+
+        if self.story_content:
+            self.story_content_z = zlib.compress(smart_bytes(self.story_content))
+            self.story_content = None
+        if self.story_original_content:
+            self.story_original_content_z = zlib.compress(smart_bytes(self.story_original_content))
+            self.story_original_content = None
+        if self.story_latest_content:
+            self.story_latest_content_z = zlib.compress(smart_bytes(self.story_latest_content))
+            self.story_latest_content = None
+        if self.story_title and len(self.story_title) > story_title_max:
+            self.story_title = self.story_title[:story_title_max]
+        if self.story_content_type and len(self.story_content_type) > story_content_type_max:
+            self.story_content_type = self.story_content_type[:story_content_type_max]
+
+        super(MStory, self).save(*args, **kwargs)
+
+        self.sync_redis()
+
+        return self
+
+    def delete(self, *args, **kwargs):
+        self.remove_from_redis()
+
+        super(MStory, self).delete(*args, **kwargs)
+
+    def delete_if_still_in_feed(self, feed_id):
+        """Delete this story only while it still belongs to feed_id. A merge or restore moving
+        a feed's stories keeps each document's id and changes its feed and hash, so a trim
+        that loaded the story before the move would otherwise delete the moved copy by id
+        and leave its new Redis and search entries behind. Returns whether it was deleted.
+        apps/rss_feeds/models.py"""
+        deleted = MStory.objects(id=self.id, story_feed_id=feed_id).delete()
+        if deleted:
+            # The loaded copy still carries the old hash, which is what the entries are under.
+            self.remove_from_redis()
+        return bool(deleted)
+
+    def publish_to_subscribers(self):
+        try:
+            r = redis.Redis(connection_pool=settings.REDIS_PUBSUB_POOL)
+            r.publish(
+                "%s:story" % (self.story_feed_id), "%s,%s" % (self.story_hash, self.story_date.strftime("%s"))
+            )
+        except redis.ConnectionError:
+            logging.debug(
+                "   ***> [%-30s] ~BMRedis is unavailable for real-time."
+                % (Feed.get_by_id(self.story_feed_id).title[:30],)
+            )
+
+    @classmethod
+    def trim_feed(cls, cutoff, feed_id=None, feed=None, verbose=True, keep_story_hashes=None):
+        extra_stories_count = 0
+        cutoff = int(cutoff)
+        if not feed_id and not feed:
+            return extra_stories_count
+
+        if not feed_id:
+            feed_id = feed.pk
+        if not feed:
+            feed = feed_id
+
+        stories = cls.objects(story_feed_id=feed_id).only("story_date").order_by("-story_date")
+
+        if stories.count() > cutoff:
+            logging.debug(
+                "   ---> [%-30s] ~FMFound %s stories. Trimming to ~SB%s~SN..."
+                % (str(feed)[:30], stories.count(), cutoff)
+            )
+            if keep_story_hashes:
+                # apps/rss_feeds/models.py ranks the stories in the feed's current response ahead of older stored
+                # ones, so an issue whose articles are dated before the previous issue survives the cutoff
+                # (forum #13884). Both date-ordered lookups load only the stories past the cutoff.
+                keep_story_hashes = list(set(keep_story_hashes))
+                current = cls.objects(story_feed_id=feed_id, story_hash__in=keep_story_hashes).order_by(
+                    "-story_date"
+                )
+                older = cls.objects(story_feed_id=feed_id, story_hash__nin=keep_story_hashes).order_by(
+                    "-story_date"
+                )
+                current_count = current.count()
+                extra_stories = list(current.skip(cutoff)) + list(older.skip(max(0, cutoff - current_count)))
+                extra_stories_count = len(extra_stories)
+            else:
+                try:
+                    story_trim_date = stories[cutoff].story_date
+                    if story_trim_date == stories[0].story_date:
+                        # Handle case where every story is the same time
+                        story_trim_date = story_trim_date - datetime.timedelta(seconds=1)
+                except IndexError as e:
+                    logging.debug(" ***> [%-30s] ~BRError trimming feed: %s" % (str(feed)[:30], e))
+                    return extra_stories_count
+
+                extra_stories = cls.objects(story_feed_id=feed_id, story_date__lte=story_trim_date)
+                extra_stories_count = extra_stories.count()
+            shared_story_count = 0
+            for story in extra_stories:
+                if story.share_count:
+                    shared_story_count += 1
+                    extra_stories_count -= 1
+                    continue
+                # Conditional on the story still being this feed's: the trim runs outside the
+                # merge lock, and a restore can have moved the story to another feed since it
+                # was loaded here.
+                if not story.delete_if_still_in_feed(feed_id):
+                    extra_stories_count -= 1
+            if verbose:
+                existing_story_count = cls.objects(story_feed_id=feed_id).count()
+                logging.debug(
+                    "   ---> Deleted %s stories, %s (%s shared) left."
+                    % (extra_stories_count, existing_story_count, shared_story_count)
+                )
+
+        return extra_stories_count
+
+    @classmethod
+    def trim_feed_by_age(cls, days, min_keep=0, feed_id=None, feed=None, verbose=True, keep_story_hashes=None):
+        """Deletes stories older than days, keeping the newest min_keep whatever their
+        date, so a feed that publishes twice a year still keeps its recent posts. The
+        count cap in trim_feed bounds how many stories a feed holds; this bounds how old
+        they get, which the count alone never did. apps/rss_feeds/models.py"""
+        if not days or int(days) <= 0:
+            return 0
+        if not feed_id and not feed:
+            return 0
+        if not feed_id:
+            feed_id = feed.pk
+        if not feed:
+            feed = feed_id
+
+        min_keep = max(0, int(min_keep or 0))
+        newest = []
+        if min_keep:
+            newest = list(
+                cls.objects(story_feed_id=feed_id, story_date__isnull=False)
+                .only("story_date")
+                .order_by("-story_date")[:min_keep]
+            )
+            if len(newest) < min_keep:
+                return 0
+
+        age_cutoff = datetime.datetime.now() - datetime.timedelta(days=int(days))
+        # Keep everything newer than the window, plus the newest min_keep when the feed is
+        # older than that. The older of the two dates is the line to delete below.
+        delete_before = age_cutoff if not newest else min(age_cutoff, newest[-1].story_date)
+        extra_stories = cls.objects(story_feed_id=feed_id, story_date__lt=delete_before)
+        if keep_story_hashes:
+            # The stories in the response that just arrived are kept even when they are dated
+            # before the window, the same way trim_feed protects them from the count cap.
+            # apps/rss_feeds/models.py
+            extra_stories = extra_stories.filter(story_hash__nin=list(set(keep_story_hashes)))
+        if not extra_stories.count():
+            return 0
+
+        deleted = 0
+        shared = 0
+        for story in extra_stories:
+            if story.share_count:
+                shared += 1
+                continue
+            if story.delete_if_still_in_feed(feed_id):
+                deleted += 1
+        if verbose:
+            logging.debug(
+                "   ---> [%-30s] ~FBDeleted %s stories older than %s days (%s shared kept)"
+                % (str(feed)[:30], deleted, days, shared)
+            )
+        return deleted
+
+    @classmethod
+    def find_story(cls, story_feed_id=None, story_id=None, story_hash=None, original_only=False):
+        original_found = False
+        if story_hash:
+            story_id = story_hash
+        story_hash = cls.ensure_story_hash(story_id, story_feed_id)
+        if not story_hash:
+            return None, False
+        if not story_feed_id:
+            story_feed_id, _ = cls.split_story_hash(story_hash)
+        if isinstance(story_id, int):
+            story = cls.objects(id=story_id).limit(1).first()
+        else:
+            story = cls.objects(story_hash=story_hash).limit(1).first()
+
+        if story:
+            original_found = True
+        if not story and not original_only:
+            story = (
+                MStarredStory.objects.filter(story_feed_id=story_feed_id, story_hash=story_hash)
+                .limit(1)
+                .first()
+            )
+
+        return story, original_found
+
+    @classmethod
+    def ensure_story_hash(cls, story_id, story_feed_id):
+        if not story_id:
+            return None
+        if not isinstance(story_id, str):
+            story_id = str(story_id)
+        if not cls.RE_STORY_HASH.match(story_id):
+            story_id = "%s:%s" % (
+                story_feed_id,
+                hashlib.sha1(story_id.encode(encoding="utf-8")).hexdigest()[:6],
+            )
+
+        return story_id
+
+    @classmethod
+    def split_story_hash(cls, story_hash):
+        if not story_hash:
+            return None, None
+        matches = cls.RE_STORY_HASH.match(story_hash)
+        if matches:
+            groups = matches.groups()
+            return groups[0], groups[1]
+        return None, None
+
+    def sync_redis(self, r=None):
+        if not r:
+            r = redis.Redis(connection_pool=settings.REDIS_STORY_HASH_POOL)
+        feed = Feed.get_by_id(self.story_feed_id)
+        if not feed:
+            return
+
+        if self.id and self.story_date > feed.unread_cutoff:
+            feed_key = "F:%s" % self.story_feed_id
+            r.sadd(feed_key, self.story_hash)
+            r.expire(feed_key, feed.days_of_story_hashes * 24 * 60 * 60)
+
+            r.zadd("z" + feed_key, {self.story_hash: time.mktime(self.story_date.timetuple())})
+            r.expire("z" + feed_key, feed.days_of_story_hashes * 24 * 60 * 60)
+
+    def remove_from_redis(self, r=None):
+        if not r:
+            r = redis.Redis(connection_pool=settings.REDIS_STORY_HASH_POOL)
+        if self.id:
+            r.srem("F:%s" % self.story_feed_id, self.story_hash)
+            r.zrem("zF:%s" % self.story_feed_id, self.story_hash)
+
+    @classmethod
+    def sync_feed_redis(cls, story_feed_id, allow_skip_resync=False):
+        r = redis.Redis(connection_pool=settings.REDIS_STORY_HASH_POOL)
+        feed = Feed.get_by_id(story_feed_id)
+        if not feed:
+            return
+        stories = cls.objects.filter(story_feed_id=story_feed_id, story_date__gte=feed.unread_cutoff)
+
+        if allow_skip_resync and stories.count() > 1000:
+            logging.debug(
+                f" ---> [{feed.log_title[:30]}] ~FYSkipping resync of ~SB{stories.count()}~SN stories because it already had archive subscribers"
+            )
+            return
+
+        # Get all story hashes currently in Redis
+        set_key = "F:%s" % story_feed_id
+        zset_key = "zF:%s" % story_feed_id
+        redis_hashes = r.smembers(set_key)
+
+        # Get all story hashes that should be in Redis from MongoDB
+        mongo_stories = list(stories.only("story_hash", "story_date"))
+        mongo_hashes = set(story.story_hash for story in mongo_stories)
+
+        # Find differences
+        to_remove = redis_hashes - mongo_hashes
+        to_add = [story for story in mongo_stories if story.story_hash not in redis_hashes]
+
+        logging.info(
+            "   ---> [%-30s] ~FMSyncing ~SB%s~SN stories to redis (-%s/+%s)"
+            % (feed and feed.log_title[:30] or story_feed_id, len(mongo_hashes), len(to_remove), len(to_add))
+        )
+
+        # Remove stories that don't exist in MongoDB
+        if to_remove:
+            p = r.pipeline()
+            for story_hash in to_remove:
+                p.srem(set_key, story_hash)
+                p.zrem(zset_key, story_hash)
+            p.execute()
+
+        # Add stories that are missing in Redis
+        if to_add:
+            p = r.pipeline()
+            for story in to_add:
+                p.sadd(set_key, story.story_hash)
+                p.zadd(zset_key, {story.story_hash: time.mktime(story.story_date.timetuple())})
+            p.expire(set_key, feed.days_of_story_hashes * 24 * 60 * 60)
+            p.expire(zset_key, feed.days_of_story_hashes * 24 * 60 * 60)
+            p.execute()
+
+    def extract_image_urls(self, force=False, text=False):
+        if self.image_urls and not force and not text:
+            return self.image_urls
+
+        story_content = None
+        if not text:
+            story_content = self.story_content_str
+        elif text:
+            if self.original_text_z:
+                story_content = smart_str(zlib.decompress(self.original_text_z))
+        if not story_content:
+            return
+
+        try:
+            soup = BeautifulSoup(story_content, features="lxml")
+        except UserWarning as e:
+            logging.debug(" ---> ~FBWarning on BS4: ~SB%s" % str(e)[:100])
+            return
+        except ValueError:
+            if not text:
+                return self.extract_image_urls(force=force, text=True)
+            else:
+                return
+
+        images = soup.findAll("img")
+
+        # Add youtube thumbnail and insert appropriately before/after images.
+        # Give the Youtube a bit of an edge.
+        video_thumbnails = soup.findAll(
+            "iframe", src=lambda x: x and any(y in x for y in ["youtube.com", "ytimg.com"])
+        )
+        for video_thumbnail in video_thumbnails:
+            video_src = video_thumbnail.get("src")
+            video_id = re.search(r".*?youtube.com/embed/([A-Za-z0-9\-_]+)", video_src)
+            if not video_id:
+                video_id = re.search(r".*?youtube.com/v/([A-Za-z0-9\-_]+)", video_src)
+            if not video_id:
+                video_id = re.search(r".*?ytimg.com/vi/([A-Za-z0-9\-_]+)", video_src)
+            if not video_id:
+                video_id = re.search(r".*?youtube.com/watch\?v=([A-Za-z0-9\-_]+)", video_src)
+            if not video_id:
+                logging.debug(f" ***> Couldn't find youtube url in {video_thumbnail}: {video_src}")
+                continue
+            video_img_url = f"https://img.youtube.com/vi/{video_id.groups()[0]}/0.jpg"
+            iframe_index = story_content.index("<iframe")
+            try:
+                img_index = story_content.index("<img") * 3
+            except ValueError:
+                img_index = None
+            if not img_index or iframe_index < img_index:
+                images.insert(0, video_img_url)
+            else:
+                images.append(video_img_url)
+
+        if not images:
+            if not text:
+                return self.extract_image_urls(force=force, text=True)
+            else:
+                return
+
+        image_urls = self.image_urls
+        if not image_urls:
+            image_urls = []
+
+        for image in images:
+            if isinstance(image, str):
+                image_url = image
+            else:
+                image_url = image.get("src")
+            if not image_url:
+                continue
+            if image_url and len(image_url) >= 1024:
+                continue
+            if "feedburner.com" in image_url:
+                continue
+            try:
+                image_url = urllib.parse.urljoin(self.story_permalink, image_url)
+            except ValueError:
+                continue
+            image_urls.append(image_url)
+
+        if not image_urls:
+            if not text:
+                return self.extract_image_urls(force=force, text=True)
+            else:
+                return
+
+        if text:
+            urls = []
+            for url in image_urls:
+                if "http://" in url[1:] or "https://" in url[1:]:
+                    continue
+                urls.append(url)
+            image_urls = urls
+
+        ordered_image_urls = []
+        for image_url in list(set(image_urls)):
+            if "feedburner" in image_url:
+                ordered_image_urls.append(image_url)
+            else:
+                ordered_image_urls.insert(0, image_url)
+        image_urls = ordered_image_urls
+
+        if len(image_urls):
+            self.image_urls = [u for u in image_urls if u]
+        else:
+            return
+
+        max_length = IMAGE_URL_MAX_LENGTH
+        while len("".join(self.image_urls)) > max_length:
+            if len(self.image_urls) <= 1:
+                self.image_urls[0] = self.image_urls[0][: max_length - 1]
+                break
+            else:
+                self.image_urls.pop()
+
+        return self.image_urls
+
+    def fetch_og_image(self):
+        """Fetch og:image meta tag from story permalink. Used for Google News
+        feeds where RSS content has no images. Decodes Google News redirect
+        URLs to get the actual article URL first."""
+
+        from utils.feed_functions import TimeoutError, timelimit
+
+        url = self.story_permalink
+        if not url:
+            return
+
+        @timelimit(15)
+        def _fetch_og(url):
+            article_url = url
+            # Decode Google News redirect URL to actual article URL
+            if "news.google.com" in url and "/articles/" in url:
+                decoded = self._decode_google_news_url(url)
+                if decoded:
+                    article_url = decoded
+                else:
+                    return None
+
+            try:
+                resp = safe_requests_get(
+                    article_url,
+                    headers={"User-Agent": "NewsBlur OG Image Fetcher"},
+                    timeout=8,
+                    allow_redirects=True,
+                )
+            except requests.RequestException:
+                return None
+            if resp.status_code != 200:
+                return None
+            # Only parse the first 50KB to find meta tags quickly
+            try:
+                soup = BeautifulSoup(resp.text[:50000], features="lxml")
+            except Exception:
+                return None
+            og_image = soup.find("meta", attrs={"property": "og:image"})
+            if og_image and og_image.get("content"):
+                return og_image["content"]
+            og_image = soup.find("meta", attrs={"name": "og:image"})
+            if og_image and og_image.get("content"):
+                return og_image["content"]
+            return None
+
+        try:
+            image_url = _fetch_og(url)
+        except TimeoutError:
+            return
+
+        if not image_url or len(image_url) >= 1024:
+            return
+
+        # Check for broken double-protocol URLs
+        if "http://" in image_url[1:] or "https://" in image_url[1:]:
+            return
+
+        if not self.image_urls:
+            self.image_urls = []
+        if image_url not in self.image_urls:
+            self.image_urls.insert(0, image_url)
+            logging.debug("   ---> Fetched og:image for Google News story: %s" % image_url[:80])
+
+        self.prepend_image_to_content(image_url)
+
+    def prepend_image_to_content(self, image_url):
+        """Prepend an image tag to the story content, replacing any previously prepended image."""
+        img_tag = f'<img src="{image_url}">'
+        story_content = ""
+        if self.story_content_z:
+            story_content = smart_str(zlib.decompress(self.story_content_z))
+
+        # Strip any previously prepended image tag
+        if story_content.startswith("<img"):
+            newline_idx = story_content.find("\n")
+            if newline_idx != -1:
+                story_content = story_content[newline_idx + 1 :]
+
+        story_content = f"{img_tag}\n{story_content}"
+        self.story_content_z = zlib.compress(smart_bytes(story_content))
+        self.story_text = story_text_for_search(story_content)
+
+    @staticmethod
+    def _decode_google_news_url(source_url):
+        """Decode a Google News redirect URL to the actual article URL.
+        Uses Google's batchexecute API with signature/timestamp from the article page."""
+        import json
+        from urllib.parse import quote, urlparse
+
+        try:
+            parsed = urlparse(source_url)
+            path_parts = parsed.path.split("/")
+            base64_str = path_parts[-1]
+        except Exception:
+            return None
+
+        # Step 1: Fetch the Google News article page to get signature and timestamp.
+        # safe_requests_get validates every redirect hop, since this now runs for
+        # user-supplied story links (TextImporter) and must never reach an internal address.
+        try:
+            resp = safe_requests_get(
+                f"https://news.google.com/articles/{base64_str}",
+                timeout=8,
+            )
+            if not resp or resp.status_code != 200:
+                return None
+        except (requests.RequestException, UnsafeUrlError):
+            return None
+
+        soup = BeautifulSoup(resp.text, features="lxml")
+        data_element = soup.select_one("c-wiz > div[jscontroller]")
+        if not data_element:
+            return None
+        signature = data_element.get("data-n-a-sg")
+        timestamp = data_element.get("data-n-a-ts")
+        if not signature or not timestamp:
+            return None
+
+        # Step 2: Call batchexecute API to decode the URL
+        try:
+            req_params = (
+                '["garturlreq",[["X","X",["X","X"],null,null,1,1,"US:en"'
+                ',null,1,null,null,null,null,null,0,1],"X","X",1,[1,1,1]'
+                f',1,1,null,0,0,null,0],"{base64_str}",{timestamp}'
+                f',"{signature}"]'
+            )
+            payload = ["Fbv4je", req_params]
+            resp = requests.post(
+                "https://news.google.com/_/DotsSplashUi/data/batchexecute",
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                },
+                data=f"f.req={quote(json.dumps([[payload]]))}",
+                timeout=8,
+                allow_redirects=False,
+            )
+            if resp.status_code != 200:
+                return None
+            parsed_data = json.loads(resp.text.split("\n\n")[1])[:-2]
+            decoded_url = json.loads(parsed_data[0][2])[1]
+            return decoded_url
+        except (requests.RequestException, json.JSONDecodeError, IndexError, TypeError, KeyError):
+            return None
+
+    def drop_cached_google_consent_text(self, original_text_z, force=False, request=None):
+        """Clear a cached copy of Google's cookie consent wall so the real article is fetched
+        (forum #13827). Only the exact stale bytes are unset, in one conditional update, so
+        a concurrent request that already cached the real article is never undone; when the
+        update matches nothing the fresh stored text is returned instead. Returns the text to
+        use and whether this call dropped the cache. Shared by MStory and MStarredStory.
+        apps/rss_feeds/models.py
+        """
+        if (
+            not original_text_z
+            or force
+            or not is_google_news_url(self.story_permalink)
+            or not is_google_consent_text(zlib.decompress(original_text_z))
+        ):
+            return original_text_z, False
+        logging.user(request, "~FYCached original text is Google's consent wall, refetching")
+        if not self.id:
+            # Never stored, so there is no shared copy to protect: just drop it in memory.
+            self.original_text_z = None
+            return None, True
+        cleared = self.__class__.objects(id=self.id, original_text_z=original_text_z).update(
+            unset__original_text_z=1
+        )
+        if cleared:
+            self.original_text_z = None
+            return None, True
+        # Another request cleared this cache first. If it has already stored the article,
+        # serve that; if its refetch is still in flight, behave as if this call dropped the
+        # cache so a failed refetch here never saves an empty text over its result.
+        fresh = self.__class__.objects(id=self.id).only("original_text_z").first()
+        self.original_text_z = fresh.original_text_z if fresh else None
+        return self.original_text_z, self.original_text_z is None
+
+    def fetch_original_text(self, force=False, request=None, debug=False):
+        original_text_z = self.original_text_z
+        # Google News stories fetched before forum #13827 was fixed cached Google's cookie
+        # consent wall as their text. Drop that cache so the real article is fetched; a failed
+        # refetch then leaves the story with no text rather than the consent boilerplate. Only
+        # Google News links qualify, so an article that merely quotes the wording is kept.
+        original_text_z, dropped_consent_cache = self.drop_cached_google_consent_text(
+            original_text_z, force=force, request=request
+        )
+
+        if not original_text_z or force:
+            feed = Feed.get_by_id(self.story_feed_id)
+            self.extract_image_urls(force=force, text=False)
+            ti = TextImporter(self, feed=feed, request=request, debug=debug)
+            original_doc = ti.fetch(return_document=True)
+            original_text = original_doc.get("content") if original_doc else None
+            self.extract_image_urls(force=force, text=True)
+            # Use Mercury's lead_image_url (og:image) if story still has no images
+            lead_image = original_doc.get("image") if original_doc else None
+            if lead_image and not self.image_urls:
+                has_broken_proto = "http://" in lead_image[1:] or "https://" in lead_image[1:]
+                if len(lead_image) < 1024 and not has_broken_proto:
+                    self.image_urls = [lead_image]
+            if dropped_consent_cache and not original_doc:
+                # The refetch after dropping a consent-wall cache failed. Saving now would
+                # write this copy's empty original_text_z over a concurrent request's
+                # successful refetch, so leave the stored document alone.
+                logging.user(request, "~FRConsent wall refetch failed, leaving the stored story untouched")
+                return original_text
+            try:
+                self.save()
+            except NotUniqueError:
+                # A racing fetcher re-created this story between the lookup that loaded it
+                # and this save, so the story_hash now belongs to the copy that won. The
+                # text we just fetched is still good, so hand it back rather than 500ing;
+                # only the cached copy is lost. apps/rss_feeds/models.py
+                logging.debug("   ---> ~SN~FRNotUniqueError caching original text: %s" % (self.story_hash,))
+        else:
+            logging.user(request, "~FYFetching ~FGoriginal~FY story text, ~SBfound.")
+            original_text = zlib.decompress(original_text_z)
+
+        return original_text
+
+    def fetch_original_page(self, force=False, request=None, debug=False):
+        from apps.rss_feeds.page_importer import PageImporter
+
+        if not self.original_page_z or force:
+            feed = Feed.get_by_id(self.story_feed_id)
+            importer = PageImporter(request=request, feed=feed, story=self)
+            original_page = importer.fetch_story()
+        else:
+            logging.user(request, "~FYFetching ~FGoriginal~FY story page, ~SBfound.")
+            original_page = zlib.decompress(self.original_page_z)
+
+        return original_page
+
+
+class MStarredStory(LegacyDocument):
+    """Like MStory, but not inherited due to large overhead of _cls and _type in
+    mongoengine's inheritance model on every single row."""
+
+    # This was a DynamicDocument in Mongo, so rows in the old collection carry fields this
+    # model does not declare (the social-era comment_user_ids/share_user_ids among them).
+    # Ignoring them keeps the one-off copy from blowing up on a row that still has one.
+    legacy_ignore_unknown_fields = True
+
+    user_id = models.IntegerField(null=True, blank=True)
+    starred_date = models.DateTimeField(null=True, blank=True)
+    starred_updated = models.DateTimeField(null=True, blank=True)
+    story_feed_id = models.IntegerField(null=True, blank=True)
+    story_date = models.DateTimeField(null=True, blank=True)
+    story_title = models.CharField(max_length=1024, null=True, blank=True)
+    story_content = models.TextField(null=True, blank=True)
+    story_content_z = models.BinaryField(null=True, blank=True)
+    story_original_content = models.TextField(null=True, blank=True)
+    story_original_content_z = models.BinaryField(null=True, blank=True)
+    original_text_z = models.BinaryField(null=True, blank=True)
+    story_content_type = models.CharField(max_length=255, null=True, blank=True)
+    story_author_name = models.TextField(null=True, blank=True)
+    story_permalink = models.TextField(null=True, blank=True)
+    story_guid = models.TextField(null=True, blank=True)
+    story_hash = models.TextField(null=True, blank=True)
+    story_tags = models.JSONField(default=list, blank=True)
+    user_notes = models.TextField(null=True, blank=True)
+    user_tags = models.JSONField(default=list, blank=True)
+    highlights = models.JSONField(default=list, blank=True)
+    image_urls = models.JSONField(default=list, blank=True)
+
+    class Meta:
+        db_table = "starred_stories"
+        ordering = ['-starred_date']
+        indexes = [
+            models.Index(fields=['user_id', '-starred_date']),
+            models.Index(fields=['user_id', 'story_feed_id']),
+            models.Index(fields=['user_id', 'story_hash']),
+            models.Index(fields=['story_feed_id']),
+        ]
+        unique_together = (('user_id', 'story_guid'),)
+
+    def __unicode__(self):
+        try:
+            user = User.objects.get(pk=self.user_id)
+            username = user.username
+        except User.DoesNotExist:
+            username = "[deleted]"
+        return "%s: %s (%s)" % (username, self.story_title[:20], self.story_feed_id)
+
+    def save(self, *args, **kwargs):
+        if self.story_content:
+            self.story_content_z = zlib.compress(smart_bytes(self.story_content))
+            self.story_content = None
+        if self.story_original_content:
+            self.story_original_content_z = zlib.compress(smart_bytes(self.story_original_content))
+            self.story_original_content = None
+        self.story_hash = self.feed_guid_hash
+        self.starred_updated = datetime.datetime.now()
+
+        return super(MStarredStory, self).save(*args, **kwargs)
+
+    @classmethod
+    def find_stories(
+        cls,
+        query,
+        user_id,
+        tag=None,
+        offset=0,
+        limit=25,
+        order="newest",
+        date_filter_start=None,
+        date_filter_end=None,
+    ):
+        stories_db = cls.objects(
+            Q(user_id=user_id)
+            & (
+                Q(story_title__icontains=query)
+                | Q(story_author_name__icontains=query)
+                | Q(story_tags__icontains=query)
+            )
+        )
+        if tag:
+            stories_db = stories_db.filter(user_tags__contains=tag)
+
+        if date_filter_start:
+            stories_db = stories_db.filter(starred_date__gte=date_filter_start)
+        if date_filter_end:
+            stories_db = stories_db.filter(starred_date__lt=date_filter_end)
+
+        if date_filter_start or date_filter_end:
+            start_log = date_filter_start.isoformat() if date_filter_start else ""
+            end_log = date_filter_end.isoformat() if date_filter_end else ""
+            logging.debug(f" ---> ~FBDate filter: start={start_log} end_exclusive={end_log}")
+
+        stories_db = stories_db.order_by("%sstarred_date" % ("-" if order == "newest" else ""))[
+            offset : offset + limit
+        ]
+        stories = Feed.format_stories(stories_db)
+
+        return stories
+
+    @classmethod
+    def trim_old_stories(cls, stories=10, days=90, dryrun=False):
+        print(" ---> Fetching starred story counts...")
+        stats = (
+            MStarredStory.objects.values("user_id")
+            .annotate(stories=Count("id"))
+            .filter(stories__gte=stories)
+            .order_by("-stories")
+        )
+        month_ago = datetime.datetime.now() - datetime.timedelta(days=days)
+        user_ids = list(stats)
+        print(" ---> Found %s users with more than %s starred stories" % (len(user_ids), stories))
+
+        total = 0
+        for stat in user_ids:
+            try:
+                user = User.objects.select_related("profile").get(pk=stat["user_id"])
+            except User.DoesNotExist:
+                user = None
+
+            if user and user.profile.last_seen_on > month_ago:
+                continue
+
+            total += stat["stories"]
+            username = "%s (%s)" % (user and user.username or " - ", stat["user_id"])
+            print(
+                " ---> %19.19s: %-20.20s %s stories"
+                % (user and user.profile.last_seen_on or "Deleted", username, stat["stories"])
+            )
+            if not dryrun and stat["_id"]:
+                cls.objects.filter(user_id=stat["_id"]).delete()
+            elif not dryrun and stat["_id"] == 0:
+                print(" ---> Deleting unstarred stories (user_id = 0)")
+                cls.objects.filter(user_id=stat["_id"]).delete()
+
+        print(" ---> Deleted %s stories in total." % total)
+
+    @property
+    def guid_hash(self):
+        return hashlib.sha1(self.story_guid.encode(encoding="utf-8")).hexdigest()[:6]
+
+    @property
+    def feed_guid_hash(self):
+        return "%s:%s" % (self.story_feed_id or "0", self.guid_hash)
+
+    @classmethod
+    def switch_feed(cls, original_feed_id, duplicate_feed_id):
+        """Update starred stories to point to the new feed after a merge."""
+        starred_stories = cls.objects.filter(story_feed_id=duplicate_feed_id)
+        count = starred_stories.count()
+        if count:
+            logging.info(
+                " ---> Switching %s starred stories from feed %s to %s"
+                % (count, duplicate_feed_id, original_feed_id)
+            )
+            for story in starred_stories:
+                # A popular feed's saved stories take a while; keep the merge's locks alive.
+                renew_merge_feeds_locks()
+                story.story_feed_id = original_feed_id
+                # Update story_hash to reflect new feed_id
+                story.story_hash = story.feed_guid_hash
+                story.save()
+        return count
+
+    drop_cached_google_consent_text = MStory.drop_cached_google_consent_text
+
+    def fetch_original_text(self, force=False, request=None, debug=False):
+        original_text_z = self.original_text_z
+        # Same consent-wall cache cleanup as MStory.fetch_original_text (forum #13827).
+        original_text_z, dropped_consent_cache = self.drop_cached_google_consent_text(
+            original_text_z, force=force, request=request
+        )
+        feed = Feed.get_by_id(self.story_feed_id)
+
+        if not original_text_z or force:
+            ti = TextImporter(self, feed=feed, request=request, debug=debug)
+            original_text = ti.fetch()
+        else:
+            logging.user(request, "~FYFetching ~FGoriginal~FY story text, ~SBfound.")
+            original_text = zlib.decompress(original_text_z)
+
+        return original_text
+
+    def fetch_original_page(self, force=False, request=None, debug=False):
+        return None
+
+
+class MStarredStoryCounts(LegacyDocument):
+    user_id = models.IntegerField(null=True, blank=True)
+    tag = models.CharField(max_length=128, null=True, blank=True)
+    feed_id = models.IntegerField(null=True, blank=True)
+    # None marks the per-user total row, so the column has to accept it (apps/rss_feeds/models.py).
+    is_highlights = models.BooleanField(default=False, null=True)
+    slug = models.CharField(max_length=128, null=True, blank=True)
+    count = models.IntegerField(default=0, null=True, blank=True)
+
+    class Meta:
+        db_table = "starred_stories_counts"
+        ordering = ['tag']
+        indexes = [
+            models.Index(fields=['user_id']),
+        ]
+
+    def __unicode__(self):
+        if self.tag:
+            return "Tag: %s (%s)" % (self.tag, self.count)
+        elif self.feed_id:
+            return "Feed: %s (%s)" % (self.feed_id, self.count)
+        elif self.is_highlights:
+            return "Highlights: %s (%s)" % (self.is_highlights, self.count)
+
+        return "%s/%s/%s" % (self.tag, self.feed_id, self.is_highlights)
+
+    @property
+    def rss_url(self, secret_token=None):
+        if self.feed_id:
+            return
+
+        if not secret_token:
+            user = User.objects.select_related("profile").get(pk=self.user_id)
+            secret_token = user.profile.secret_token
+
+        slug = self.slug if self.slug else ""
+        if not self.slug and self.tag:
+            slug = slugify(self.tag)
+            self.slug = slug
+            self.save()
+
+        return "%s/reader/starred_rss/%s/%s/%s" % (settings.NEWSBLUR_URL, self.user_id, secret_token, slug)
+
+    @classmethod
+    def user_counts(cls, user_id, include_total=False, try_counting=True):
+        counts = cls.objects.filter(user_id=user_id)
+        counts = sorted(
+            [
+                {
+                    "tag": c.tag,
+                    "count": c.count,
+                    "is_highlights": c.is_highlights,
+                    "feed_address": c.rss_url,
+                    "active": True,
+                    "feed_id": c.feed_id,
+                }
+                for c in counts
+            ],
+            key=lambda x: (x.get("tag", "") or "").lower(),
+        )
+
+        total = 0
+        feed_total = 0
+        for c in counts:
+            if not c["tag"] and not c["feed_id"] and not c["is_highlights"]:
+                total = c["count"]
+            if c["feed_id"]:
+                feed_total += c["count"]
+
+        if try_counting and (total != feed_total or not len(counts)):
+            user = User.objects.get(pk=user_id)
+            logging.user(
+                user, "~FC~SBCounting~SN saved stories (%s total vs. %s counted)..." % (total, feed_total)
+            )
+            cls.count_for_user(user_id)
+            return cls.user_counts(user_id, include_total=include_total, try_counting=False)
+
+        if include_total:
+            return counts, total
+        return counts
+
+    @classmethod
+    def schedule_count_tags_for_user(cls, user_id):
+        ScheduleCountTagsForUser.apply_async(kwargs=dict(user_id=user_id))
+
+    @classmethod
+    def count_for_user(cls, user_id, total_only=False):
+        user_tags = []
+        user_feeds = []
+        highlights = 0
+
+        if not total_only:
+            cls.objects(user_id=user_id).delete()
+            try:
+                user_tags = cls.count_tags_for_user(user_id)
+                highlights = cls.count_highlights_for_user(user_id)
+                user_feeds = cls.count_feeds_for_user(user_id)
+            except DatabaseError as e:
+                logging.debug(" ---> ~FBDatabaseError on Postgres: ~SB%s" % e)
+
+        total_stories_count = MStarredStory.objects(user_id=user_id).count()
+        cls.objects.update_or_create(
+            user_id=user_id,
+            tag=None,
+            feed_id=None,
+            is_highlights=None,
+            defaults={"count": total_stories_count},
+        )
+
+        return dict(total=total_stories_count, tags=user_tags, feeds=user_feeds, highlights=highlights)
+
+    @classmethod
+    def count_tags_for_user(cls, user_id):
+        all_tags = Counter()
+        tagged_stories = MStarredStory.objects.filter(user_id=user_id).values_list("user_tags", flat=True)
+        for tags in tagged_stories:
+            for tag in tags or []:
+                all_tags[tag] += 1
+        user_tags = sorted(
+            [(k, v) for k, v in list(all_tags.items()) if int(v) > 0 and k],
+            key=lambda x: x[0].lower(),
+            reverse=True,
+        )
+
+        for tag, count in list(dict(user_tags).items()):
+            cls.objects.update_or_create(
+                user_id=user_id, tag=tag, slug=slugify(tag), defaults={"count": count}
+            )
+
+        return user_tags
+
+    @classmethod
+    def count_highlights_for_user(cls, user_id):
+        # Postgres cannot express "array is not empty" as a JSON lookup: Django reads
+        # highlights__len as the key "len", so exclude the empty list explicitly.
+        highlighted_count = MStarredStory.objects(user_id=user_id).exclude(highlights=[]).count()
+        if highlighted_count > 0:
+            cls.objects.update_or_create(
+                user_id=user_id,
+                is_highlights=True,
+                slug="highlights",
+                defaults={"count": highlighted_count},
+            )
+        else:
+            cls.objects(user_id=user_id, is_highlights=True, slug="highlights").delete()
+
+        return highlighted_count
+
+    @classmethod
+    def count_feeds_for_user(cls, user_id):
+        all_feeds = dict(
+            MStarredStory.objects.filter(user_id=user_id)
+            .values_list("story_feed_id")
+            .annotate(_count=Count("id"))
+        )
+        user_feeds = dict([(k, v) for k, v in list(all_feeds.items()) if v])
+
+        # Clean up None'd and 0'd feed_ids, so they can be counted against the total
+        if user_feeds.get(None, False):
+            user_feeds[0] = user_feeds.get(0, 0)
+            user_feeds[0] += user_feeds.get(None)
+            del user_feeds[None]
+        if user_feeds.get(0, False):
+            user_feeds[-1] = user_feeds.get(0, 0)
+            del user_feeds[0]
+
+        too_many_feeds = False if len(user_feeds) < 1000 else True
+        for feed_id, count in list(user_feeds.items()):
+            if too_many_feeds and count <= 1:
+                continue
+            cls.objects.update_or_create(
+                user_id=user_id, feed_id=feed_id, slug="feed:%s" % feed_id, defaults={"count": count}
+            )
+
+        return user_feeds
+
+    @classmethod
+    def adjust_count(cls, user_id, feed_id=None, tag=None, highlights=None, amount=0):
+        params = dict(user_id=user_id)
+        if feed_id:
+            params["feed_id"] = feed_id
+        if tag:
+            params["tag"] = tag
+        if highlights:
+            params["is_highlights"] = True
+
+        if not cls.objects.filter(**params).update(count=F("count") + amount):
+            cls.objects.create(count=amount, **params)
+        try:
+            story_count = cls.objects.get(**params)
+        except cls.MultipleObjectsReturned:
+            story_count = cls.objects(**params).first()
+        except cls.DoesNotExist:
+            return
+        if story_count and story_count.count <= 0:
+            story_count.delete()
+
+    @classmethod
+    def switch_feed(cls, original_feed_id, duplicate_feed_id):
+        """Merge starred story counts from duplicate feed into original feed."""
+        # Get all counts for the duplicate feed
+        duplicate_counts = cls.objects.filter(feed_id=duplicate_feed_id)
+        count = duplicate_counts.count()
+        if count:
+            logging.info(
+                " ---> Switching %s starred story count records from feed %s to %s"
+                % (count, duplicate_feed_id, original_feed_id)
+            )
+            for dup_count in duplicate_counts:
+                renew_merge_feeds_locks()
+                # Find or create matching count for original feed
+                try:
+                    orig_count = cls.objects.get(
+                        user_id=dup_count.user_id,
+                        feed_id=original_feed_id,
+                        tag=dup_count.tag,
+                        is_highlights=dup_count.is_highlights,
+                    )
+                    # Merge counts
+                    orig_count.count += dup_count.count
+                    orig_count.save()
+                    dup_count.delete()
+                except cls.DoesNotExist:
+                    # Just update the feed_id
+                    dup_count.feed_id = original_feed_id
+                    dup_count.slug = "feed:%s" % original_feed_id if dup_count.feed_id else dup_count.slug
+                    dup_count.save()
+        return count
+
+    @classmethod
+    def rename_tag(cls, user_id, old_tag, new_tag):
+        """
+        Rename a tag for a user: update all starred stories and recalculate counts.
+        If new_tag already exists, merges the stories (case-insensitive).
+        Returns the updated starred counts.
+        """
+        from django.template.defaultfilters import slugify
+
+        if not old_tag or not new_tag:
+            return None
+
+        old_tag = old_tag.strip()
+        new_tag = new_tag.strip()
+
+        if not old_tag or not new_tag:
+            return None
+
+        # Case-insensitive comparison: if old and new are the same (ignoring case), just normalize
+        if old_tag.lower() == new_tag.lower():
+            # Just update the tag name to the new casing if different
+            if old_tag != new_tag:
+                MStarredStory.objects(user_id=user_id, user_tags=old_tag).update(set__user_tags__S=new_tag)
+                cls.objects(user_id=user_id, tag=old_tag).update(set__tag=new_tag, set__slug=slugify(new_tag))
+            return cls.user_counts(user_id)
+
+        # Update all stories: for each story that has old_tag, add new_tag (if not present) and remove old_tag
+        # Use MongoDB's atomic operators for efficiency
+        stories_with_old_tag = MStarredStory.objects(user_id=user_id, user_tags=old_tag)
+        for story in stories_with_old_tag:
+            user_tags = story.user_tags or []
+            # Remove old_tag and add new_tag if not already present (case-insensitive check)
+            new_tags = [t for t in user_tags if t.lower() != old_tag.lower()]
+            # Check if new_tag (case-insensitive) is already present
+            has_new_tag = any(t.lower() == new_tag.lower() for t in new_tags)
+            if not has_new_tag:
+                new_tags.append(new_tag)
+            story.user_tags = new_tags
+            story.save()
+
+        # Delete the old tag count entry
+        cls.objects(user_id=user_id, tag=old_tag).delete()
+
+        # Recalculate counts for the user (this will create/update the new tag count)
+        cls.count_tags_for_user(user_id)
+
+        return cls.user_counts(user_id)
+
+    @classmethod
+    def delete_tag(cls, user_id, tag):
+        """
+        Delete a tag from all user's starred stories (stories remain saved, just without the tag).
+        Returns the updated starred counts.
+        """
+        if not tag:
+            return None
+
+        tag = tag.strip()
+        if not tag:
+            return None
+
+        # Remove the tag from all stories that have it
+        MStarredStory.objects(user_id=user_id, user_tags=tag).update(pull__user_tags=tag)
+
+        # Delete the tag count entry
+        cls.objects(user_id=user_id, tag=tag).delete()
+
+        return cls.user_counts(user_id)
+
+
+def empty_fetch_history():
+    """Fetch history shaped like MFetchHistory.feed() returns, but with no entries.
+
+    Used when the analytics DB is unavailable: callers index these keys
+    directly, so they need every key present rather than an empty dict.
+    """
+    return {
+        "feed_fetch_history": [],
+        "page_fetch_history": [],
+        "push_history": [],
+    }
+
+
+def history_date_string(date):
+    # A fetch-history row lives in a JSON column, so its timestamp travels as text
+    # (apps/rss_feeds/models.py).
+    return date.strftime("%Y-%m-%d %H:%M:%S.%f")
+
+
+def parse_history_date(value):
+    # The datetime behind a stored fetch-history timestamp.
+    if isinstance(value, datetime.datetime):
+        return value
+    try:
+        return datetime.datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return datetime.datetime.now()
+
+
+class MFetchHistory(LegacyDocument):
+    feed_id = models.IntegerField(unique=True, null=True, blank=True)
+    feed_fetch_history = models.JSONField(default=list, blank=True)
+    page_fetch_history = models.JSONField(default=list, blank=True)
+    push_history = models.JSONField(default=list, blank=True)
+    raw_feed_history = models.JSONField(default=list, blank=True)
+
+    class Meta:
+        db_table = "fetch_history"
+
+    @classmethod
+    @skip_when_analytics_down(default=empty_fetch_history)
+    def feed(cls, feed_id, timezone=None, fetch_history=None):
+        if not fetch_history:
+            try:
+                fetch_history = cls.objects.read_preference().get(
+                    feed_id=feed_id
+                )
+            except cls.DoesNotExist:
+                fetch_history = cls.objects.create(feed_id=feed_id)
+        history = {}
+
+        for fetch_type in ["feed_fetch_history", "page_fetch_history", "push_history"]:
+            history[fetch_type] = getattr(fetch_history, fetch_type)
+            if not history[fetch_type]:
+                history[fetch_type] = []
+            for f, fetch in enumerate(history[fetch_type]):
+                date_key = "push_date" if fetch_type == "push_history" else "fetch_date"
+                history[fetch_type][f] = {
+                    date_key: localtime_for_timezone(parse_history_date(fetch[0]), timezone).strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    ),
+                    "status_code": fetch[1],
+                    "message": fetch[2],
+                }
+        return history
+
+    @classmethod
+    @skip_when_analytics_down(default=0)
+    def delete_for_feed(cls, feed_id):
+        """Drop a merged-away feed's fetch history. Analytics is optional: an outage must
+        never abort merge_feeds partway through (apps/rss_feeds/models.py)."""
+        return cls.objects(feed_id=feed_id).delete()
+
+    @classmethod
+    @skip_when_analytics_down(default=empty_fetch_history)
+    def add(cls, feed_id, fetch_type, date=None, message=None, code=None, exception=None):
+        if not date:
+            date = datetime.datetime.now()
+        if message is not None:
+            message = smart_str(message)[:4096]
+        primary_objects = cls.objects.read_preference()
+        try:
+            fetch_history = primary_objects.get(feed_id=feed_id)
+        except cls.DoesNotExist:
+            try:
+                fetch_history = cls.objects.create(feed_id=feed_id)
+            except NotUniqueError:
+                fetch_history = primary_objects.get(feed_id=feed_id)
+
+        if fetch_type == "feed":
+            history = fetch_history.feed_fetch_history or []
+        elif fetch_type == "page":
+            history = fetch_history.page_fetch_history or []
+        elif fetch_type == "push":
+            history = fetch_history.push_history or []
+        elif fetch_type == "raw_feed":
+            history = fetch_history.raw_feed_history or []
+
+        # The history column is JSON, so the timestamp travels as a string; feed() parses it back.
+        history = [[history_date_string(date), code, message]] + history
+        any_exceptions = any([c for d, c, m in history if c not in [200, 304]])
+        if any_exceptions:
+            history = history[:25]
+        elif fetch_type == "raw_feed":
+            history = history[:10]
+        else:
+            history = history[:5]
+
+        if fetch_type == "feed":
+            fetch_history.feed_fetch_history = history
+        elif fetch_type == "page":
+            fetch_history.page_fetch_history = history
+        elif fetch_type == "push":
+            fetch_history.push_history = history
+        elif fetch_type == "raw_feed":
+            fetch_history.raw_feed_history = history
+
+        fetch_history.save()
+
+        return cls.feed(feed_id, fetch_history=fetch_history)
+
+
+class DuplicateFeed(models.Model):
+    duplicate_address = models.CharField(max_length=764, db_index=True)
+    duplicate_link = models.CharField(max_length=764, null=True, db_index=True)
+    duplicate_feed_id = models.CharField(max_length=255, null=True, db_index=True)
+    feed = models.ForeignKey(Feed, related_name="duplicate_addresses", on_delete=models.CASCADE)
+
+    def __str__(self):
+        return "%s: %s / %s" % (self.feed, self.duplicate_address, self.duplicate_link)
+
+    def canonical(self):
+        return {
+            "duplicate_address": self.duplicate_address,
+            "duplicate_link": self.duplicate_link,
+            "duplicate_feed_id": self.duplicate_feed_id,
+            "feed_id": self.feed_id,
+        }
+
+    def save(self, *args, **kwargs):
+        max_address = DuplicateFeed._meta.get_field("duplicate_address").max_length
+        if len(self.duplicate_address) > max_address:
+            self.duplicate_address = self.duplicate_address[:max_address]
+        max_link = DuplicateFeed._meta.get_field("duplicate_link").max_length
+        if self.duplicate_link and len(self.duplicate_link) > max_link:
+            self.duplicate_link = self.duplicate_link[:max_link]
+
+        super(DuplicateFeed, self).save(*args, **kwargs)
+
+
+MERGE_FEEDS_INVENTORY_PREFIX = "MERGE_FEEDS_INVENTORY"
+MERGE_FEEDS_INVENTORY_BATCH = 500
+
+
+PRIVATE_FEED_ADDRESS_PLACEHOLDER = "private-feed-address:%s"
+PRIVATE_FEED_LINK_PLACEHOLDER = "private-feed-link:%s"
+
+
+class MMergeFeedsPrivateInventory(LegacyDocument):
+    """The address and link of a private branch (a feed with a parent) as they were when a
+    merge inventoried it. The inventory line in the task log carries placeholders for them,
+    since a private branch's address can hold a reader's access token and the logs travel
+    further than the database; restore_merged_feed reads the real values from here by feed
+    id and the inventory's logged_at. apps/rss_feeds/models.py"""
+
+    feed_id = models.IntegerField(null=True, blank=True)
+    logged_at = models.TextField(null=True, blank=True)
+    feed_address = models.TextField(null=True, blank=True)
+    feed_link = models.TextField(null=True, blank=True)
+
+    class Meta:
+        db_table = "merge_feeds_private_inventory"
+        indexes = [
+            models.Index(fields=['feed_id', 'logged_at']),
+        ]
+
+    @classmethod
+    def keep(cls, feed, logged_at):
+        return cls.objects.create(
+            feed_id=feed.pk, logged_at=logged_at, feed_address=feed.feed_address, feed_link=feed.feed_link
+        )
+
+    @classmethod
+    def lookup(cls, feed_id, logged_at):
+        return cls.objects(feed_id=feed_id, logged_at=logged_at).first()
+
+
+def merge_feeds_inventory_record(record):
+    """Write one merge inventory record as a single JSON line. It goes through the raw
+    "newsblur" logger rather than utils.log.info, whose colorizer rewrites "[" and "]" and
+    would corrupt the JSON. Read back with `manage.py restore_merged_feed`.
+    apps/rss_feeds/models.py
+    """
+    logging.getlogger().info("%s %s" % (MERGE_FEEDS_INVENTORY_PREFIX, json.encode(record)))
+
+
+def folder_names_holding_feed(folders, feed_id, parent=()):
+    """Every folder path whose direct children include feed_id, as a list of names from the
+    top ([] for the root), walking a UserSubscriptionFolders tree (ints are feeds,
+    {name: [...]} dicts are folders). Full paths, so Work/News and Personal/News stay apart."""
+    paths = []
+    for item in folders:
+        if isinstance(item, int) and item == feed_id:
+            paths.append(list(parent))
+        elif isinstance(item, dict):
+            for name, children in item.items():
+                paths.extend(folder_names_holding_feed(children, feed_id, tuple(parent) + (name,)))
+    return paths
+
+
+def log_merge_feeds_inventory(original_feed, duplicate_feed, recovery=False):
+    """Log everything merge_feeds is about to touch, as JSON records, so a bad merge can be
+    undone from the task logs alone with `manage.py restore_merged_feed` (forum #13830: a
+    merge cascade-deleted two feeds and 700 subscriptions with no record of what they were).
+
+    For both feeds: the full Feed row and FeedData rows as Django serializer objects, and
+    every subscription as a serializer object plus the folder names that hold the feed in
+    that reader's tree. That is exactly what a restore needs: the feed row with its original
+    id (folder trees and starred stories point at ids), the subscription rows with their
+    read state, and where in each reader's sidebar the feed belongs. Feeds branched from the
+    duplicate are listed by id only, and a private branch among the two feeds themselves has
+    its address and link replaced by placeholders in the log and kept in
+    MMergeFeedsPrivateInventory instead, since a branch can be a reader's private URL
+    carrying an access token. apps/rss_feeds/models.py
+    """
+    from django.core import serializers
+
+    from apps.reader.models import UserSubscription, UserSubscriptionFolders
+
+    merge = {
+        "original_feed_id": original_feed.pk,
+        "duplicate_feed_id": duplicate_feed.pk,
+        "logged_at": datetime.datetime.utcnow().isoformat(),
+        # A merge that folds a parked feed into a feed being restored is part of a recovery,
+        # not a merge to undo; restore_merged_feed skips these when picking a snapshot.
+        "recovery": recovery,
+    }
+    emitted_subscriptions = {}
+    for role, feed in (("original", original_feed), ("duplicate", duplicate_feed)):
+        emitted_subscriptions[role] = 0
+        feed_object = json.decode(serializers.serialize("json", [feed]))[0]
+        if feed.is_private_branch:
+            MMergeFeedsPrivateInventory.keep(feed, merge["logged_at"])
+            feed_object["fields"]["feed_address"] = PRIVATE_FEED_ADDRESS_PLACEHOLDER % feed.pk
+            feed_object["fields"]["feed_link"] = PRIVATE_FEED_LINK_PLACEHOLDER % feed.pk
+        merge_feeds_inventory_record(
+            {
+                "type": "feed",
+                "role": role,
+                "merge": merge,
+                "object": feed_object,
+                "private": feed.is_private_branch,
+                "stories": MStory.objects(story_feed_id=feed.pk).count(),
+                "starred": MStarredStory.objects(story_feed_id=feed.pk).count(),
+            }
+        )
+        for feed_data in json.decode(serializers.serialize("json", FeedData.objects.filter(feed=feed))):
+            merge_feeds_inventory_record(
+                {"type": "feeddata", "role": role, "merge": merge, "object": feed_data}
+            )
+        # Batched by subscription id so a popular survivor never has every reader's sidebar
+        # in memory at once inside the fetching worker.
+        last_pk = 0
+        while True:
+            batch = list(
+                UserSubscription.objects.filter(feed=feed, pk__gt=last_pk).order_by("pk")[
+                    :MERGE_FEEDS_INVENTORY_BATCH
+                ]
+            )
+            if not batch:
+                break
+            last_pk = batch[-1].pk
+            # A popular feed's inventory takes a while; keep the merge's locks alive.
+            renew_merge_feeds_locks()
+            folder_rows = dict(
+                UserSubscriptionFolders.objects.filter(
+                    user_id__in=[sub.user_id for sub in batch]
+                ).values_list("user_id", "folders")
+            )
+            for subscription in json.decode(serializers.serialize("json", batch)):
+                user_id = subscription["fields"]["user"]
+                folders_json = folder_rows.get(user_id)
+                placements = []
+                if folders_json:
+                    placements = folder_names_holding_feed(json.decode(folders_json), feed.pk)
+                merge_feeds_inventory_record(
+                    {
+                        "type": "subscription",
+                        "role": role,
+                        "merge": merge,
+                        "object": subscription,
+                        "folders": placements,
+                        "has_folder_row": user_id in folder_rows,
+                    }
+                )
+                emitted_subscriptions[role] += 1
+    merge_feeds_inventory_record(
+        {
+            "type": "summary",
+            "merge": merge,
+            # Counts of the records written above, not live queries: a reader subscribing
+            # between the batches and this summary must not make a complete inventory look cut short.
+            "original_subscriptions": emitted_subscriptions["original"],
+            "duplicate_subscriptions": emitted_subscriptions["duplicate"],
+            "branches_of_duplicate": list(
+                Feed.objects.filter(branch_from_feed=duplicate_feed).values_list("pk", flat=True)
+            ),
+            "duplicate_rows": DuplicateFeed.objects.filter(feed=duplicate_feed).count(),
+        }
+    )
+
+
+def move_one_story(story, from_feed_id, to_feed_id, to_feed):
+    """Move one loaded story to to_feed_id, or drop it when the target already has that
+    story. Every write is conditional on the document still belonging to from_feed_id, so
+    two merges of the same parked feed running at once (the restore command and a fetch
+    worker's save) can never delete a story the other one just moved. Returns "moved",
+    "dropped", or "gone". apps/rss_feeds/models.py
+    """
+    guid_hash = story.story_hash.split(":", 1)[1] if story.story_hash and ":" in story.story_hash else None
+    if not guid_hash:
+        return "gone"
+    still_here = MStory.objects(id=story.id, story_feed_id=from_feed_id)
+    new_hash = "%s:%s" % (to_feed_id, guid_hash)
+    if MStory.objects(story_hash=new_hash).count():
+        if still_here.delete():
+            story.remove_from_redis()
+            return "dropped"
+        return "gone"
+    changes = dict(set__story_feed_id=to_feed_id, set__story_hash=new_hash)
+    if story.story_permalink and story.story_hash in story.story_permalink:
+        # A newsletter's permalink is its own story hash on this site; it has to name the
+        # new hash, or the link in the reader's email opens a 404.
+        changes["set__story_permalink"] = story.story_permalink.replace(story.story_hash, new_hash)
+    try:
+        updated = still_here.update(**changes)
+    except NotUniqueError:
+        # A fetch of the target feed stored this story between the lookup above and the
+        # update; the target copy wins and only the source copy goes.
+        if still_here.delete():
+            story.remove_from_redis()
+            return "dropped"
+        return "gone"
+    if not updated:
+        return "gone"
+    # The loaded story still carries the old feed id and hash, so this clears the old
+    # Redis entries; the reload below picks up the new ones.
+    story.remove_from_redis()
+    story.reload()
+    story.sync_redis()
+    return "moved"
+
+
+def move_stories_between_feeds(from_feed_id, to_feed_id):
+    """Re-home every story of from_feed_id under to_feed_id, dropping a copy whose story the
+    target already has. MStory.save recomputes story_hash from the new feed id and re-syncs
+    Redis, and RUserStory.switch_feed has already moved readers' read state to the new id.
+    Used by merge_feeds for a feed parked by restore_merged_feed, whose stories were fetched
+    while the original row was gone and would otherwise be deleted. apps/rss_feeds/models.py
+    """
+    moved = dropped = 0
+    to_feed = Feed.get_by_id(to_feed_id)
+    # no_cache: a large Archive feed's stories, content and all, must not pile up in the
+    # cursor's result cache inside the worker while they are walked.
+    for story in MStory.objects(story_feed_id=from_feed_id).no_cache():
+        # An Archive feed can take longer than the lease; keep the locks, or stop.
+        renew_merge_feeds_locks()
+        outcome = move_one_story(story, from_feed_id, to_feed_id, to_feed)
+        moved += outcome == "moved"
+        dropped += outcome == "dropped"
+    logging.info(
+        " ---> merge_feeds moved %s stories from %s to %s (%s duplicates dropped)"
+        % (moved, from_feed_id, to_feed_id, dropped)
+    )
+    return moved, dropped
+
+
+# The lease is renewed inside a merge's loops (renew_merge_feeds_locks), so it only has to
+# cover the longest single step, deleting a big duplicate's stories, and it bounds how long a
+# process killed mid-merge keeps its feeds locked. A lease that expired mid-merge would let
+# a second merge of the same feeds start, which is why renewal stops a merge whose lease is
+# gone. apps/rss_feeds/models.py
+MERGE_FEEDS_LOCK_TIMEOUT_SECONDS = 10 * 60
+# The hash restore_merged_feed gives a feed re-added at a lost feed's address while the lost
+# row comes back; Feed.save keeps it and merge_feeds moves such a feed's stories rather than
+# deleting them. apps/rss_feeds/models.py
+RESTORE_PARKED_HASH_PREFIX = "restore-parked-"
+# A held lock is renewed once this much of its lease has passed since it was taken or last
+# renewed. The check runs before every story, subscription or inventory record a locked loop
+# handles and costs a clock read; the renewal itself is one Redis call. What is left of the
+# lease is the margin one slow step (a Google News story's image lookup, a big delete) has to
+# finish in. apps/rss_feeds/models.py
+MERGE_FEEDS_RENEW_AFTER_FRACTION = 1 / 3
+# Tests swap this for a clock they advance by hand.
+_merge_lock_clock = time.monotonic
+# How many times a writer follows a feed merged away while it waited for the feed's lock
+# before it gives up on the write. apps/rss_feeds/models.py
+FEED_WRITE_LOCK_ATTEMPTS = 5
+
+
+def restore_target_from_parking_hash(parking_hash):
+    """The id of the feed a restore-parked-<parked>-for-<target> hash names, or None."""
+    try:
+        return int(parking_hash.rsplit("-for-", 1)[1])
+    except (AttributeError, IndexError, ValueError):
+        return None
+
+
+MERGE_FEEDS_LOCK_BLOCKING_SECONDS = 120
+# A fetch holds its feed's lock only while the batch is written, and a fetch worker killed
+# by its hard time limit never releases it, so the fetch lease is short and renewed before
+# every story add_update_stories handles; a fetch that cannot get the lock quickly (a merge
+# or restore of the feed is running) gives up and comes back on its next schedule rather
+# than holding a worker slot. apps/rss_feeds/models.py
+FETCH_LOCK_TIMEOUT_SECONDS = 2 * 60
+FETCH_LOCK_BLOCKING_SECONDS = 30
+# A fetch that could not get its feed's lock in time comes back this much later; nothing was
+# written and the validators are untouched, so the same response is fetched again, and the
+# wait is not a publisher failure. apps/rss_feeds/models.py
+FETCH_LOCK_DEFERRAL_SECONDS = 5 * 60
+# The Redis key (feed-update pool) that carries a deferral through the scheduling calls
+# that follow a fetch; see Feed.defer_next_fetch. apps/rss_feeds/models.py
+FETCH_DEFERRAL_KEY = "fetch_deferred:%s"
+# A merge that keeps finding yet another feed for the survivor's final save to collide with
+# stops widening its lock set here. apps/rss_feeds/models.py
+MERGE_FEEDS_MAX_LOCKS = 6
+# A branch needs at least this many subscriptions before it can outlive the feed it is branched
+# from in a merge (merge_feeds_inverted_branch). Surviving clears its parent and makes its
+# address public, and a reader's private URL (a token in the address) is read by one account,
+# maybe a few; 12,170 branches on production had exactly one reader in September 2026. A feed wrongly
+# re-parented under a copy has hundreds or thousands. apps/rss_feeds/models.py
+MERGE_FEEDS_INVERTED_BRANCH_MIN_READERS = 10
+# A merge that would move at least this many subscriptions is too big for a fetch task: the
+# address check queues it as its own task (apps/rss_feeds/tasks.py MergeFeeds), and
+# merge_feeds_locked logs the call that finishes it if it is cut short. apps/rss_feeds/models.py
+MERGE_FEEDS_LARGE_MOVE_SUBSCRIPTIONS = 1000
+# Set while a MergeFeeds for a pair of feeds is queued or running, so each failing fetch of the
+# feed during a long merge does not queue another one (queue_merge_feeds_once). It lives as
+# long as the task's hard time limit, so a merge killed without clearing it can be queued again
+# after that. apps/rss_feeds/models.py
+MERGE_FEEDS_QUEUED_KEY = "merge_feeds_queued:%s:%s"
+MERGE_FEEDS_QUEUED_SECONDS = 65 * 60
+# The merge locks this thread holds, by feed id. merge_feeds_locked ends with a full
+# Feed.save of the survivor, which merges again on a hash collision; that nested merge must
+# not wait on locks its own caller holds, and a long merge renews the leases of all of them.
+# apps/rss_feeds/models.py
+_merge_feeds_locks_held = threading.local()
+
+
+def _merge_locks_held():
+    if not hasattr(_merge_feeds_locks_held, "locks"):
+        _merge_feeds_locks_held.locks = {}
+    return _merge_feeds_locks_held.locks
+
+
+def renew_merge_feeds_locks():
+    """Extend the lease of every merge lock this thread holds back to the full timeout.
+    Called from inside a merge's long loops (a parked feed's stories moving, a popular feed's
+    subscriptions switching, the inventory being logged), so a merge that outlasts a lease
+    keeps its locks; when a lease was already lost, the merge stops here instead of going on
+    unlocked next to another merge of the same feeds. apps/rss_feeds/models.py"""
+    now = _merge_lock_clock()
+    for feed_id, held in list(_merge_locks_held().items()):
+        lock, lease, renewed_at = held
+        if now - renewed_at < lease * MERGE_FEEDS_RENEW_AFTER_FRACTION:
+            continue
+        try:
+            lock.extend(lease, replace_ttl=True)
+        except LockError as e:
+            raise LockError("merge_feeds:%s lease was lost while the merge was running: %s" % (feed_id, e))
+        held[2] = _merge_lock_clock()
+
+
+@contextlib.contextmanager
+def feed_write_lock(feed_id, timeout=None, blocking_timeout=None):
+    """Hold the merge lock of the feed that feed_id resolves to, and yield that feed, or None
+    when it is gone. Once a lock is held the feed is looked up again: a feed merged away
+    while the caller waited resolves to its survivor (Feed.get_by_id follows DuplicateFeed),
+    and the survivor's own lock is what protects its stories, so the stale lock is released
+    and the survivor's taken and checked the same way. ProcessFeed writes a fetch's stories
+    under it and EmailNewsletter stores a delivered newsletter under it, both on the short
+    fetch lease. apps/rss_feeds/models.py"""
+    locked_feed_id = feed_id
+    for attempt in range(FEED_WRITE_LOCK_ATTEMPTS):
+        with merge_feeds_lock(locked_feed_id, timeout=timeout, blocking_timeout=blocking_timeout):
+            feed = Feed.get_by_id(locked_feed_id)
+            if feed is None:
+                logging.debug(" ***> Feed %s was deleted while it was being written to" % locked_feed_id)
+                yield None
+                return
+            if feed.pk != locked_feed_id:
+                logging.debug(
+                    " ***> Feed %s was merged into %s while it was being written to, locking the survivor"
+                    % (locked_feed_id, feed.pk)
+                )
+                locked_feed_id = feed.pk
+                continue
+            yield feed
+            return
+    logging.debug(
+        " ***> Feed %s was merged away %s times while it was being written to, giving up"
+        % (locked_feed_id, FEED_WRITE_LOCK_ATTEMPTS)
+    )
+    yield None
+
+
+class merge_feeds_lock:
+    """Per-feed Redis locks taken in id order, reentrant within a thread, released in reverse
+    even when a later acquisition fails. merge_feeds holds them for both feeds (and for a
+    third feed the survivor's final save would merge with), and ProcessFeed holds the one for
+    the feed it is writing stories to, so a fetch in flight and a merge of the same feed take
+    turns instead of stranding stories under a deleted id.
+
+    Every thread acquires ids in increasing order, nested requests included: a request for an
+    id below one this thread already holds is tried without waiting and fails at once when
+    another worker has it. Waiting there is the one way two workers can each hold a lock the
+    other needs, with both stalled until a blocking timeout fails one of them.
+    apps/rss_feeds/models.py
+    """
+
+    def __init__(self, *feed_ids, timeout=None, blocking_timeout=None):
+        self.feed_ids = [feed_id for feed_id in feed_ids if feed_id]
+        # The lease and how long to wait for it: a merge's by default, a fetch's shorter ones
+        # when ProcessFeed asks. Renewals keep each lock on the lease it was taken with.
+        self.timeout = timeout or MERGE_FEEDS_LOCK_TIMEOUT_SECONDS
+        self.blocking_timeout = blocking_timeout or MERGE_FEEDS_LOCK_BLOCKING_SECONDS
+        self.locks = []
+        self.entered = []
+        self.taken = []
+
+    def __enter__(self):
+        held = _merge_locks_held()
+        self.taken = [feed_id for feed_id in sorted(set(self.feed_ids)) if feed_id not in held]
+        highest_held = max(held) if held else None
+        r = redis.Redis(connection_pool=settings.REDIS_STORY_HASH_POOL)
+        self.locks = [
+            r.lock("merge_feeds:%s" % feed_id, timeout=self.timeout, blocking_timeout=self.blocking_timeout)
+            for feed_id in self.taken
+        ]
+        try:
+            for feed_id, lock in zip(self.taken, self.locks):
+                # The locks already held (the caller's and the ones taken above) are renewed
+                # while the next one is waited for: several waits of nearly the blocking
+                # timeout would otherwise eat most of the first lease before the body ran.
+                renew_merge_feeds_locks()
+                out_of_order = highest_held is not None and feed_id < highest_held
+                if not lock.acquire(blocking=not out_of_order):
+                    if out_of_order:
+                        raise LockError(
+                            "merge_feeds:%s is held by another worker and this worker already holds "
+                            "merge_feeds:%s; not waiting out of id order" % (feed_id, highest_held)
+                        )
+                    raise LockError(
+                        "merge_feeds:%s was not released within %s seconds" % (feed_id, self.blocking_timeout)
+                    )
+                self.entered.append(lock)
+                # Registered as it is taken, so its lease is tracked from its own acquisition.
+                held[feed_id] = [lock, self.timeout, _merge_lock_clock()]
+            # Every lease is still ours before the body runs.
+            renew_merge_feeds_locks()
+        except BaseException:
+            self._release()
+            raise
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self._release()
+
+    def _release(self):
+        # Also after a failed acquisition: a first lock taken before a second timed out must
+        # not stay held until its lease runs out.
+        held = _merge_locks_held()
+        for feed_id in self.taken:
+            held.pop(feed_id, None)
+        for lock in reversed(self.entered):
+            try:
+                lock.release()
+            except LockError as e:
+                # A lease that ran out was already released by Redis; the others still go.
+                logging.debug(" ***> merge_feeds lock %s already released: %s" % (lock.name, e))
+        self.entered = []
+
+
+def merge_feeds_orientation(original_feed, duplicate_feed, force=False, preserve_branch_from_feed=False):
+    """Which of the two feeds survives a merge, the address it will carry, and the flags the
+    merge runs with. A feed parked by restore_merged_feed always folds into the other one
+    with the other one's parent kept; otherwise the feed with more readers survives, and a
+    feed branched from another gives way to the unbranched one and lends it its address
+    without the underscore, unless the unbranched feed is the branch's own parent and the
+    branch has more subscriptions and at least MERGE_FEEDS_INVERTED_BRANCH_MIN_READERS of
+    them (see merge_feeds_inverted_branch). merge_feeds_locked applies the result;
+    merge_feeds uses it to find the third feed the survivor's final save would merge with.
+    apps/rss_feeds/models.py
+    """
+    # A feed parked by restore_merged_feed carries a placeholder hash while the original row
+    # comes back; Feed.save keeps that hash and folds the row into the restored feed on any
+    # save (a fetch worker's included), so whoever gets here first must have it fold into the
+    # restored feed, never the other way round, with the parent kept.
+    parked_duplicate = (duplicate_feed.hash_address_and_link or "").startswith(RESTORE_PARKED_HASH_PREFIX)
+    if parked_duplicate:
+        force = True
+        preserve_branch_from_feed = True
+
+    heavier_dupe = original_feed.num_subscribers < duplicate_feed.num_subscribers
+    branched_original = original_feed.branch_from_feed and not duplicate_feed.branch_from_feed
+    survivor_address = original_feed.feed_address
+    inverted_branch = None if force else merge_feeds_inverted_branch(original_feed, duplicate_feed)
+    if inverted_branch:
+        # The branch is the feed people actually read, so it survives with its own address;
+        # merge_feeds_locked clears its parent, which is the other feed being folded in.
+        if inverted_branch.pk == duplicate_feed.pk:
+            original_feed, duplicate_feed = duplicate_feed, original_feed
+        survivor_address = original_feed.feed_address
+    elif (heavier_dupe or branched_original) and not force:
+        original_feed, duplicate_feed = duplicate_feed, original_feed
+        survivor_address = original_feed.feed_address
+        if branched_original:
+            survivor_address = strip_underscore_from_feed_address(duplicate_feed.feed_address)
+    return original_feed, duplicate_feed, survivor_address, force, preserve_branch_from_feed, parked_duplicate
+
+
+def queue_merge_feeds_once(original_feed_id, duplicate_feed_id, feed_address=None):
+    """Queue MergeFeeds for this pair unless one is already queued or running, and say whether
+    this call queued it. The key is the same whichever way round the pair is given.
+    apps/rss_feeds/models.py
+    """
+    r = redis.Redis(connection_pool=settings.REDIS_FEED_UPDATE_POOL)
+    key = MERGE_FEEDS_QUEUED_KEY % tuple(sorted([original_feed_id, duplicate_feed_id]))
+    if not r.set(key, 1, nx=True, ex=MERGE_FEEDS_QUEUED_SECONDS):
+        return False
+    MergeFeeds.apply_async(args=(original_feed_id, duplicate_feed_id, feed_address))
+    return True
+
+
+def clear_merge_feeds_queued(original_feed_id, duplicate_feed_id):
+    """Let the next collision of this pair queue a merge again (MergeFeeds calls this when it
+    ends, however it ends). apps/rss_feeds/models.py"""
+    r = redis.Redis(connection_pool=settings.REDIS_FEED_UPDATE_POOL)
+    r.delete(MERGE_FEEDS_QUEUED_KEY % tuple(sorted([original_feed_id, duplicate_feed_id])))
+
+
+def settle_address_check_merge(feed, feed_address):
+    """Finish check_feed_link_for_feed_address once its save, and any merge that save set off
+    inline or through MergeFeeds, is done: the surviving feed takes the discovered address
+    when it does not already have it (a merge keeps the heavier feed's own address, and the
+    feed that held the discovered one is gone now) and is marked healthy only if it did.
+    Returns (fixed, feed) for the fetcher, which records an error when nothing was fixed.
+    apps/rss_feeds/models.py
+    """
+    if feed.feed_address != feed_address:
+        if Feed.feed_holding_address(feed_address, feed.feed_link, exclude_ids=[feed.pk]):
+            # A merge cut short left the other feed in place; the next collision resumes it.
+            return False, feed
+        feed.feed_address = feed_address
+        feed = feed.save() or feed
+    feed.count_subscribers()
+    # feed.schedule_feed_fetch_immediately() # Don't fetch as it can get stuck in a loop
+    feed.has_feed_exception = False
+    feed.active = True
+    feed = feed.save() or feed
+    return True, feed
+
+
+def merge_feeds_inverted_branch(original_feed, duplicate_feed):
+    """The branched one of the two feeds when it is branched from the other one, the other one
+    is unbranched, and the branch has more subscriptions than the other one and at least
+    MERGE_FEEDS_INVERTED_BRANCH_MIN_READERS of them, or None. A reader's private branch
+    normally gives way in a merge, but Change Feed Address used to re-parent an existing feed
+    under the reader's copy, which left popular feeds branched from small or empty ones;
+    Hacker News was one, and it lost a merge to an empty RSSHub copy (forum #13860). Which of
+    the two was created first says nothing either way (a merge re-parents branches onto a
+    newer survivor, and the bug re-parented feeds under older copies too), so the readers
+    decide. num_subscribers is summed over the whole branch family, so it reads the same on
+    both feeds; the subscription rows tell them apart. apps/rss_feeds/models.py
+    """
+    from apps.reader.models import UserSubscription
+
+    if original_feed.branch_from_feed_id == duplicate_feed.pk:
+        branch, trunk = original_feed, duplicate_feed
+    elif duplicate_feed.branch_from_feed_id == original_feed.pk:
+        branch, trunk = duplicate_feed, original_feed
+    else:
+        return None
+    if trunk.branch_from_feed_id:
+        return None
+    branch_readers = UserSubscription.objects.filter(feed_id=branch.pk).count()
+    if branch_readers < MERGE_FEEDS_INVERTED_BRANCH_MIN_READERS:
+        return None
+    trunk_readers = UserSubscription.objects.filter(feed_id=trunk.pk).count()
+    if branch_readers > trunk_readers:
+        return branch
+    return None
+
+
+def merge_feeds_collision_id(
+    original_feed_id, duplicate_feed_id, force=False, preserve_branch_from_feed=False
+):
+    """The id of a third feed already holding the address and link the survivor is saved
+    with at the end of the merge, or None. Looked up the way Feed.save does on its
+    IntegrityError: by the hash, then by the exact address and link, since the stored hash
+    of either feed can be stale after a save with update_fields. apps/rss_feeds/models.py
+    """
+    try:
+        original_feed = Feed.objects.get(pk=original_feed_id)
+        duplicate_feed = Feed.objects.get(pk=duplicate_feed_id)
+    except Feed.DoesNotExist:
+        return None
+    original_feed, duplicate_feed, survivor_address, _, _, _ = merge_feeds_orientation(
+        original_feed, duplicate_feed, force, preserve_branch_from_feed
+    )
+    third_feed = Feed.feed_holding_address(
+        survivor_address, original_feed.feed_link, exclude_ids=[original_feed.pk, duplicate_feed.pk]
+    )
+    return third_feed.pk if third_feed else None
+
+
+def merge_feeds(original_feed_id, duplicate_feed_id, force=False, preserve_branch_from_feed=False):
+    """Fold duplicate_feed into original_feed and delete it. With preserve_branch_from_feed
+    the survivor keeps its own parent (unless that parent is the duplicate being deleted),
+    which restore_merged_feed relies on so a restored private branch never turns public
+    partway through the merge.
+
+    Merges of the same duplicate are serialized on a Redis lock: restore_merged_feed and a
+    fetch worker saving a parked feed can both arrive here, and two interleaved runs could
+    each load a subscription before the other moved it and then delete it as a duplicate.
+
+    The survivor's final save merges again when its address and link already belong to a
+    third feed (see merge_feeds_collision_id), so that feed's lock is taken up front with the
+    other two, in one ordered acquisition: a nested merge that waited for it out of id order
+    could sit in a cycle with another worker merging the same feeds the other way round.
+    apps/rss_feeds/models.py
+    """
+    if original_feed_id == duplicate_feed_id:
+        logging.info(" ***> Merging the same feed. Ignoring...")
+        return original_feed_id
+    if not original_feed_id or not duplicate_feed_id:
+        # Feed.save reaches here with self.pk None when a brand-new feed collides on insert;
+        # there is nothing to lock and the body's missing-feed guard answers.
+        return merge_feeds_locked(original_feed_id, duplicate_feed_id, force, preserve_branch_from_feed)
+    # One lock per feed, taken in id order so two merges never wait on each other in a
+    # cycle: merge_feeds(a, b) may swap the two when b has more readers, and merge_feeds(c, a)
+    # touching a at the same time must wait for a's lock as well.
+    lock_ids = {original_feed_id, duplicate_feed_id}
+    while True:
+        with merge_feeds_lock(*lock_ids):
+            collision_id = merge_feeds_collision_id(
+                original_feed_id, duplicate_feed_id, force, preserve_branch_from_feed
+            )
+            if collision_id and collision_id not in lock_ids and len(lock_ids) < MERGE_FEEDS_MAX_LOCKS:
+                # Checked under the locks, so neither feed's address can move underneath the
+                # answer. The wider set is taken again from scratch, in id order, rather than
+                # adding the new id below the ones already held.
+                logging.info(
+                    " ---> merge_feeds(%s, %s): the survivor's address already belongs to feed %s, "
+                    "locking it too" % (original_feed_id, duplicate_feed_id, collision_id)
+                )
+                lock_ids.add(collision_id)
+                continue
+            return merge_feeds_locked(original_feed_id, duplicate_feed_id, force, preserve_branch_from_feed)
+
+
+def merge_feeds_locked(original_feed_id, duplicate_feed_id, force=False, preserve_branch_from_feed=False):
+    """The body of merge_feeds; call merge_feeds, which holds the per-duplicate lock."""
+    from apps.reader.models import MCustomFeedIcon, UserSubscription
+
+    if original_feed_id == duplicate_feed_id:
+        logging.info(" ***> Merging the same feed. Ignoring...")
+        return original_feed_id
+    try:
+        original_feed = Feed.objects.get(pk=original_feed_id)
+        duplicate_feed = Feed.objects.get(pk=duplicate_feed_id)
+    except Feed.DoesNotExist:
+        logging.info(" ***> Already deleted feed: %s" % duplicate_feed_id)
+        return original_feed_id
+
+    # merge_feeds took the locks for the orientation this decides (and for a third feed the
+    # survivor's final save collides with); it is decided again here from the rows as they
+    # are under the locks.
+    (
+        original_feed,
+        duplicate_feed,
+        survivor_address,
+        force,
+        preserve_branch_from_feed,
+        parked_duplicate,
+    ) = merge_feeds_orientation(original_feed, duplicate_feed, force, preserve_branch_from_feed)
+    original_feed_id, duplicate_feed_id = original_feed.pk, duplicate_feed.pk
+    original_feed.feed_address = survivor_address
+
+    logging.info(
+        " ---> Feed: [%s - %s] %s - %s"
+        % (original_feed_id, duplicate_feed_id, original_feed, original_feed.loggable_link)
+    )
+    logging.info(
+        "            Orig ++> %s: (%s subs) %s / %s %s"
+        % (
+            original_feed.pk,
+            original_feed.num_subscribers,
+            original_feed.loggable_address,
+            original_feed.loggable_link,
+            " [B: %s]" % original_feed.branch_from_feed.pk if original_feed.branch_from_feed else "",
+        )
+    )
+    logging.info(
+        "            Dupe --> %s: (%s subs) %s / %s %s"
+        % (
+            duplicate_feed.pk,
+            duplicate_feed.num_subscribers,
+            duplicate_feed.loggable_address,
+            duplicate_feed.loggable_link,
+            " [B: %s]" % duplicate_feed.branch_from_feed.pk if duplicate_feed.branch_from_feed else "",
+        )
+    )
+
+    log_merge_feeds_inventory(original_feed, duplicate_feed, recovery=parked_duplicate)
+
+    keep_parent = preserve_branch_from_feed and original_feed.branch_from_feed_id not in (
+        None,
+        duplicate_feed.pk,
+    )
+    if not keep_parent:
+        original_feed.branch_from_feed = None
+
+    user_subs = UserSubscription.objects.filter(feed=duplicate_feed).order_by("-pk")
+    moving_subscriptions = user_subs.count()
+    if moving_subscriptions >= MERGE_FEEDS_LARGE_MOVE_SUBSCRIPTIONS:
+        logging.info(
+            " ---> merge_feeds is moving %s subscriptions from %s to %s; if it is stopped partway, "
+            "rerun merge_feeds(%s, %s, force=%s) to finish it"
+            % (
+                moving_subscriptions,
+                duplicate_feed.pk,
+                original_feed.pk,
+                original_feed.pk,
+                duplicate_feed.pk,
+                force,
+            )
+        )
+    for user_sub in user_subs:
+        renew_merge_feeds_locks()
+        user_sub.switch_feed(original_feed, duplicate_feed)
+
+    # Switch starred stories and their counts to the new feed. Each of these walks renews
+    # the merge's locks per record; the lease is checked again before every phase that
+    # deletes or rewrites something, so nothing is written under a lease that ran out.
+    MStarredStory.switch_feed(original_feed.pk, duplicate_feed.pk)
+    MStarredStoryCounts.switch_feed(original_feed.pk, duplicate_feed.pk)
+
+    # Switch custom feed icons to the new feed
+    MCustomFeedIcon.switch_feed(original_feed.pk, duplicate_feed.pk)
+
+    def delete_story_feed(model, feed_field="feed_id"):
+        duplicate_stories = model.objects(**{feed_field: duplicate_feed.pk})
+        # if duplicate_stories.count():
+        #     logging.info(" ---> Deleting %s %s" % (duplicate_stories.count(), model))
+        duplicate_stories.delete()
+
+    if parked_duplicate:
+        # A parked feed collected its stories while the original row was gone; they move to
+        # the restored feed rather than being deleted, whatever a fetch worker adds meanwhile.
+        move_stories_between_feeds(duplicate_feed.pk, original_feed.pk)
+
+    renew_merge_feeds_locks()
+    # Clear Redis story hashes before bulk-deleting stories, since queryset
+    # .delete() bypasses the instance MStory.delete() / remove_from_redis().
+    r = redis.Redis(connection_pool=settings.REDIS_STORY_HASH_POOL)
+    r.delete("F:%s" % duplicate_feed.pk)
+    r.delete("zF:%s" % duplicate_feed.pk)
+    if not parked_duplicate:
+        # A parked feed's stories were moved above and are moved once more right before the
+        # row goes, so a story a fetch worker adds in between is carried across, never deleted.
+        delete_story_feed(MStory, "story_feed_id")
+    delete_story_feed(MFeedPage, "feed_id")
+    delete_story_feed(MFeedIcon, "feed_id")
+    MFetchHistory.delete_for_feed(duplicate_feed.pk)
+
+    redirect_address, redirect_link = duplicate_feed.feed_address, duplicate_feed.feed_link
+    if parked_duplicate:
+        # A parked feed can have followed a publisher's redirect onto an address another live
+        # feed holds. The redirect by id must still resolve (a fetch of the parked feed in
+        # flight lands on the survivor), but that address has to keep resolving to its owner,
+        # so the row carries the survivor's own address instead.
+        address_owner = Feed.feed_holding_address(
+            redirect_address, redirect_link, exclude_ids=[duplicate_feed.pk, original_feed.pk]
+        )
+        if address_owner:
+            logging.info(
+                " ---> merge_feeds: parked feed %s sits at an address feed %s owns; its redirect keeps "
+                "only the id" % (duplicate_feed.pk, address_owner.pk)
+            )
+            redirect_address, redirect_link = original_feed.feed_address, original_feed.feed_link
+    try:
+        DuplicateFeed.objects.create(
+            duplicate_address=redirect_address,
+            duplicate_link=redirect_link,
+            duplicate_feed_id=duplicate_feed.pk,
+            feed=original_feed,
+        )
+    except (IntegrityError, OperationError) as e:
+        logging.info(" ***> Could not save DuplicateFeed: %s" % e)
+
+    # Switch this dupe feed's dupe feeds over to the new original.
+    duplicate_feeds_duplicate_feeds = DuplicateFeed.objects.filter(feed=duplicate_feed)
+    for dupe_feed in duplicate_feeds_duplicate_feeds:
+        dupe_feed.feed = original_feed
+        dupe_feed.duplicate_feed_id = duplicate_feed.pk
+        dupe_feed.save()
+
+    logging.debug(
+        " ---> Dupe subscribers (%s): %s, Original subscribers (%s): %s"
+        % (duplicate_feed.pk, duplicate_feed.num_subscribers, original_feed.pk, original_feed.num_subscribers)
+    )
+    # Until migration 0014 made branch_from_feed PROTECT, deleting the duplicate cascaded to
+    # every feed branched from it, including the survivor when it was one of them (forum
+    # #13830). Re-parent those feeds to the survivor and persist the survivor's cleared parent
+    # before the delete: that keeps them (and their private-branch status) and is also what
+    # lets the protected delete go through.
+    branched_feeds = Feed.objects.filter(branch_from_feed=duplicate_feed).exclude(pk=original_feed.pk)
+    for branched_id in branched_feeds.values_list("pk", flat=True):
+        logging.info(
+            " ---> merge_feeds re-parenting feed %s from %s to %s"
+            % (branched_id, duplicate_feed.pk, original_feed.pk)
+        )
+    branched_feeds.update(branch_from_feed=original_feed)
+    if not keep_parent:
+        Feed.objects.filter(pk=original_feed.pk).update(branch_from_feed=None)
+    if parked_duplicate:
+        move_stories_between_feeds(duplicate_feed.pk, original_feed.pk)
+    renew_merge_feeds_locks()
+    if duplicate_feed.pk != original_feed.pk:
+        duplicate_feed.delete()
+    else:
+        logging.debug(" ***> Duplicate feed is the same as original feed. Panic!")
+    logging.debug(" ---> Deleted duplicate feed: %s/%s" % (duplicate_feed, duplicate_feed_id))
+    if not keep_parent:
+        original_feed.branch_from_feed = None
+    renew_merge_feeds_locks()
+    original_feed.count_subscribers()
+    try:
+        original_feed.save()
+    except LockError as e:
+        # The save collided with a feed merge_feeds did not lock up front (it took the
+        # address in the moment between the collision lookup and now) and that feed's lock
+        # is held elsewhere. This merge's bookkeeping is done; the collision is merged by
+        # the survivor's next save, which every fetch performs.
+        logging.info(
+            " ***> merge_feeds(%s, %s): the survivor's save collided with a feed whose lock is held, "
+            "leaving that merge to the next save: %s" % (original_feed_id, duplicate_feed_id, e)
+        )
+    logging.debug(" ---> Now original subscribers: %s" % (original_feed.num_subscribers))
+
+    return original_feed_id
+
+
+def rewrite_folders(folders, original_feed, duplicate_feed):
+    new_folders = []
+
+    for k, folder in enumerate(folders):
+        if isinstance(folder, int):
+            if folder == duplicate_feed.pk:
+                # logging.info("              ===> Rewrote %s'th item: %s" % (k+1, folders))
+                new_folders.append(original_feed.pk)
+            else:
+                new_folders.append(folder)
+        elif isinstance(folder, dict):
+            for f_k, f_v in list(folder.items()):
+                new_folders.append({f_k: rewrite_folders(f_v, original_feed, duplicate_feed)})
+
+    return new_folders

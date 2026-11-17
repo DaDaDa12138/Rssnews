@@ -1,0 +1,159 @@
+{% load i18n %}
+{% load utils_tags %}
+{% load static %}
+{% load pipeline %}
+<!DOCTYPE html>
+  <html lang="{{ ui_language }}" dir="{{ ui_language_dir }}">
+    <head>
+      <title>
+        {% block title %}NewsBlur{% endblock %}
+      </title>
+      <link rel="shortcut icon"
+            href="{{ MEDIA_URL }}img/favicon.ico"
+            type="image/png" />
+      <link rel="icon" href="{{ MEDIA_URL }}img/favicon_32.png" sizes="32x32" />
+      <link rel="icon" href="{{ MEDIA_URL }}img/favicon_64.png" sizes="64x64" />
+      <link rel="apple-touch-icon"
+            href="{{ MEDIA_URL }}img/pwa/apple-touch-icon.png" />
+      <link rel="manifest" href="{% url "pwa-manifest" %}">
+      <meta name="theme-color" content="#1875F3">
+      <meta name="apple-mobile-web-app-capable" content="yes">
+      <meta name="apple-mobile-web-app-status-bar-style" content="default">
+      <meta name="apple-mobile-web-app-title" content="NewsBlur">
+      <meta http-equiv="Content-type" content="text/html; charset=utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <!-- Feed images load straight from third-party CDNs. Many of them (ithome,
+           huxiu, ...) answer 403 when a Referer is present, which is exactly what
+           Chrome reports as ERR_BLOCKED_BY_ORB, so never leak our URL upstream.
+           same-origin keeps the header for our own requests. -->
+      <meta name="referrer" content="same-origin">
+      <meta name="msapplication-TileImage"
+            content="{{ MEDIA_URL }}img/logo_144.png" />
+      <meta name="msapplication-TileColor" content="#F7E5A8" />
+      {% include "includes/i18n_scripts.html" %}
+      {% block head %}{% endblock %}
+      {{ preference_defaults|json_script:"nb-preference-defaults" }}
+      {{ newsblur_urls|json_script:"nb-urls" }}
+      <script nonce="{{ request.csp_nonce }}" type="text/javascript" charset="utf-8">
+    window.NEWSBLUR = {};
+    NEWSBLUR.language_preference = "{{ ui_language_preference|escapejs }}";
+    NEWSBLUR.language_auto_label = "{{ ui_language_auto_label|escapejs }}";
+    NEWSBLUR.detected_language = "{{ ui_detected_language|escapejs }}";
+    NEWSBLUR.languages = [{% for code, name in ui_languages %}["{{ code|escapejs }}", "{{ name|escapejs }}"]{% if not forloop.last %},{% endif %}{% endfor %}];
+    {% if user.is_authenticated %}NEWSBLUR.language_chooser_copy = {{ ui_language_chooser_copy|safe }};{% endif %}
+    NEWSBLUR.Globals = {
+      'is_authenticated'        : {{ user.is_authenticated|yesno:"true,false" }},
+      'is_anonymous'            : {{ user.is_anonymous|yesno:"true,false" }},
+      'is_admin'                : {{ user.is_staff|yesno:"true,false" }},
+      'is_staff'                : {{ user.is_staff|yesno:"true,false" }},
+      'secret_token'            : "{{ user_profile.secret_token }}",
+      'username'                : "{{ user.username|escapejs }}",
+      {% if user.pk %}'user_id'                 : {{ user.pk }},{% endif %}
+      'email'                   : "{{ user.email|escapejs }}",
+      'MEDIA_URL'               : "{{ MEDIA_URL }}",
+      'debug'                   : {{ debug|yesno:"true,false" }},
+      'default_days_of_unread'  : {% settings_value "DAYS_OF_UNREAD" %},
+      'default_days_of_unread_free': {% settings_value "DAYS_OF_UNREAD_FREE" %}
+    };
+    NEWSBLUR.Preferences = JSON.parse(document.getElementById('nb-preference-defaults').textContent);
+    NEWSBLUR.Preferences.feed_pane_size = {% firstof user_profile.feed_pane_size 282 %};
+    NEWSBLUR.Preferences.days_of_unread = {% firstof user_profile.days_of_unread 30 %};
+    NEWSBLUR.Preferences.timezone = "{{ user_profile.timezone|escapejs }}";
+    NEWSBLUR.Preferences.send_emails = {{ user_profile.send_emails|yesno:"true,false" }};
+    NEWSBLUR.Preferences.hide_getting_started = {{ user_profile.hide_getting_started|yesno:"true,false" }};
+    NEWSBLUR.Preferences.has_setup_feeds = {{ user_profile.has_setup_feeds|yesno:"true,false" }};
+    NEWSBLUR.Preferences.has_found_friends = {{ user_profile.has_found_friends|yesno:"true,false" }};
+    NEWSBLUR.Preferences.has_trained_intelligence = {{ user_profile.has_trained_intelligence|yesno:"true,false" }};
+    // Generated from the URLconf by apps/reader/url_map.py, so a renamed route is one edit.
+    NEWSBLUR.URLs = JSON.parse(document.getElementById('nb-urls').textContent);
+    NEWSBLUR.Models = {};
+    NEWSBLUR.Collections = {};
+    NEWSBLUR.Views = {};
+    NEWSBLUR.app = {};
+      </script>
+      {% block stylesheets %}{% include_stylesheets "common" %}{% endblock %}{# base.html: RTL pages get the mirrored bundle here (utils_tags.py, utils/rtl_css.py), then the hand-written reader_rtl.css overrides. #}
+      {% if ui_language_rtl %}{% include_stylesheets "rtl" %}{% endif %}
+    </head>
+    <body class="{% block bodyclass %}{% endblock %} {% if user.is_staff %}NB-staff{% endif %}">
+      {{ theme_state|json_script:"nb-theme" }}
+      <script nonce="{{ request.csp_nonce }}">(function(){
+        // base.html: paint the theme before the page renders so nothing flashes.
+        // The stored preference (theme_state) wins for a signed-in reader; the
+        // localStorage copy only fills in for anonymous pages, where there is no
+        // account to read a preference from.
+        var state = {authenticated: false, theme: null};
+        try { state = JSON.parse(document.getElementById('nb-theme').textContent); } catch (e) {}
+        var cached = null;
+        try {
+          var raw = localStorage.getItem('newsblur:theme');
+          if (raw) { var stored = JSON.parse(raw); if (stored && stored.theme) cached = stored.theme; }
+        } catch (e) {}
+        var theme = (state.authenticated && state.theme) ? state.theme : (cached || 'auto');
+        if (state.authenticated && state.theme) {
+          try { localStorage.setItem('newsblur:theme', JSON.stringify({theme: state.theme, ts: Date.now()})); } catch (e) {}
+        }
+        if (theme === 'auto') {
+          theme = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+        }
+        if (theme === 'dark') document.body.classList.add('NB-dark');
+      })()</script>
+      {% block header %}{% endblock %}
+      <div class="NB-body-inner">
+        <div class="NB-splash-info NB-splash-top">
+          <div class="NB-splash-top-nav">
+            {% block nav_language %}{% endblock %}
+            <span class="NB-splash-top-title">{% block nav_title %}{% endblock %}</span>
+            <ul class="NB-splash-top-links">
+              <li class="NB-splash-top-link NB-splash-top-link-home"><a href="{% url "index" %}">{% trans "Home" %}</a></li>
+              {% if user.is_authenticated %}
+                <li class="NB-splash-top-link"><a href="{% url "logout" %}">{% trans "Log Out" %}</a></li>
+              {% else %}
+                <li class="NB-splash-top-link"><a href="{% url "login" %}">{% trans "Log In" %}</a></li>
+              {% endif %}
+            </ul>
+            <div class="NB-splash-top-logo">
+              <div class="NB-theme-toggle" title="{% trans 'Toggle theme' %}">
+                <svg class="NB-theme-toggle-sun" viewBox="0 0 24 24" width="14" height="14" fill="none">
+                  <circle cx="12" cy="12" r="4" fill="currentColor"/>
+                  <path d="M12 2v3M12 19v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M2 12h3M19 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                </svg>
+                <button class="NB-theme-toggle-track" aria-label="{% trans 'Toggle dark mode' %}" type="button">
+                  <span class="NB-theme-toggle-thumb"></span>
+                </button>
+                <svg class="NB-theme-toggle-moon" viewBox="0 0 24 24" width="14" height="14" fill="none">
+                  <path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z" fill="currentColor"/>
+                </svg>
+              </div>
+              <a href="{% url "index" %}">
+                <div class="NB-splash-blurred-logo"></div>
+              </a>
+            </div>
+          </div>
+          <a href="{% url "index" %}" class="NB-splash-top-logo-fallback">
+            <div class="NB-splash-title NB-splash-blurred-logo"></div>
+          </a>
+        </div>
+        <a href="{% url "index" %}" class="NB-mobile-logo-link">
+          <div class="NB-mobile-logo"></div>
+        </a>
+        {% block content %}{% endblock %}
+        {% block footer %}
+          {% render_footer "welcome" %}
+        {% endblock footer %}
+      </div>
+      {% block head_js %}
+        {% include_javascripts "common_vendor" %}
+        {% include_javascripts "common" %}
+      {% endblock head_js %}
+      {{ user_preferences|json_script:"nb-user-preferences" }}
+      {{ user_view_settings|json_script:"nb-view-settings" }}
+      {{ user_collapsed_folders|json_script:"nb-collapsed-folders" }}
+      <script nonce="{{ request.csp_nonce }}" type="text/javascript" charset="utf-8">
+    Object.assign(NEWSBLUR.Preferences, JSON.parse(document.getElementById('nb-user-preferences').textContent));
+    Object.assign(NEWSBLUR.Preferences['view_settings'], JSON.parse(document.getElementById('nb-view-settings').textContent));
+    Object.assign(NEWSBLUR.Preferences['collapsed_folders'], JSON.parse(document.getElementById('nb-collapsed-folders').textContent));
+      </script>
+      {% block extra_head_js %}
+      {% endblock extra_head_js %}
+    </body>
+  </html>

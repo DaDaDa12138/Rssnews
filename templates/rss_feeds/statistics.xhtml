@@ -1,0 +1,52 @@
+{% load utils_tags %}
+<!DOCTYPE html>
+<html lang="{{ ui_language }}" dir="{{ ui_language_dir }}">
+<head>
+  {% include "includes/i18n_scripts.html" %}
+  <title>{% block title %}NewsBlur{% endblock %}</title>
+  {% include_stylesheets "common" %}
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+  <style>
+    @media (prefers-color-scheme: dark) {
+      html, body { background-color: #191b1c; color: #c0c0c0; }
+    }
+  </style>
+
+  <script nonce="{{ request.csp_nonce }}">
+    window.NEWSBLUR = {};
+    NEWSBLUR.Models = {};
+    NEWSBLUR.Collections = {};
+    NEWSBLUR.Globals = {
+      'is_authenticated'        : {{ user.is_authenticated|yesno:"true,false" }},
+      'is_anonymous'            : {{ user.is_anonymous|yesno:"true,false" }},
+      'MEDIA_URL'               : "{{ MEDIA_URL }}"
+    };
+    NEWSBLUR.URLs = {
+      'favicon'                 : "/rss_feeds/icon/{id}"
+    };
+  </script>
+  {{ stats|json_script:"nb-stats" }}
+
+  {% include_javascripts "statistics" %}
+  
+</head>
+
+<body class="NB-embedded-statistics">
+
+  <div class="NB-embedded-stats"></div>
+
+  <script nonce="{{ request.csp_nonce }}">
+    if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+      document.body.classList.add('NB-dark');
+    }
+  </script>
+  {{ feed_json|json_script:"nb-feed" }}
+  <script nonce="{{ request.csp_nonce }}">
+    NEWSBLUR.stats = JSON.parse(document.getElementById('nb-stats').textContent);
+    NEWSBLUR.stats_feed = new NEWSBLUR.Models.Feed(JSON.parse(document.getElementById('nb-feed').textContent));
+    NEWSBLUR.stats_dialog = new NEWSBLUR.ReaderStatistics({{ feed.pk }}, {embedded: true});
+    NEWSBLUR.stats_dialog.populate_stats(null, NEWSBLUR.stats);
+  </script>
+  
+</body>
+</html>

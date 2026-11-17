@@ -1,0 +1,145 @@
+/* splash.css - Top navigation bar and theme toggle for the personal edition.
+   The upstream stylesheet that carried these rules (css/pages/welcome.css) was
+   removed together with the marketing pages, so the compact rules live here. */
+
+.NB-splash-top {
+    position: relative;
+    z-index: 20;
+    background: transparent;
+    padding: 0 24px;
+}
+
+.NB-splash-top-nav {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    max-width: 1400px;
+    height: 56px;
+    margin: 0 auto;
+}
+
+.NB-splash-top-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: #4a4a44;
+    letter-spacing: 0.2px;
+}
+
+.NB-splash-top-links {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    margin: 0 0 0 auto;
+    padding: 0;
+    list-style: none;
+}
+
+.NB-splash-top-link a {
+    font-size: 14px;
+    color: #6a6a60;
+    text-decoration: none;
+    transition: color 0.15s ease;
+}
+
+.NB-splash-top-link a:hover {
+    color: #c8951c;
+}
+
+.NB-splash-top-logo {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+}
+
+.NB-splash-top-logo a {
+    display: block;
+    line-height: 0;
+}
+
+.NB-splash-top-logo-fallback {
+    display: none;
+}
+
+.NB-mobile-logo-link {
+    display: none;
+}
+
+/* Theme toggle: sun icon, track, moon icon. */
+.NB-theme-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.NB-theme-toggle-sun {
+    color: #c8951c;
+}
+
+.NB-theme-toggle-moon {
+    color: #9a9a90;
+}
+
+.NB-theme-toggle-track {
+    position: relative;
+    width: 34px;
+    height: 18px;
+    padding: 0;
+    border: 0;
+    border-radius: 9px;
+    background: #d5cfbe;
+    cursor: pointer;
+    transition: background 0.2s ease;
+}
+
+.NB-theme-toggle-thumb {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--nb-legacy-fff);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+    transition: left 0.2s ease;
+}
+
+.NB-dark .NB-theme-toggle-track {
+    background: #4d7a5b;
+}
+
+.NB-dark .NB-theme-toggle-thumb {
+    left: 18px;
+}
+
+.NB-dark .NB-theme-toggle-sun {
+    color: #7c7c6e;
+}
+
+.NB-dark .NB-theme-toggle-moon {
+    color: #e9dca8;
+}
+
+.NB-dark .NB-splash-top-title {
+    color: #e8e2d2;
+}
+
+.NB-dark .NB-splash-top-link a {
+    color: #b9b3a2;
+}
+
+.NB-dark .NB-splash-top-link a:hover {
+    color: #e9dca8;
+}
+
+@media only screen and (max-width: 700px) {
+    .NB-splash-top-nav {
+        height: 48px;
+        gap: 12px;
+    }
+
+    .NB-splash-top-links {
+        gap: 14px;
+    }
+}

@@ -1,0 +1,194 @@
+[
+    {
+        "pk": 3,
+        "model": "auth.user",
+        "fields": {
+            "username": "conesus",
+            "first_name": "",
+            "last_name": "",
+            "is_active": true,
+            "is_superuser": false,
+            "is_staff": false,
+            "last_login": "2011-07-18 00:23:49",
+            "groups": [],
+            "user_permissions": [],
+            "password": "pbkdf2_sha256$180000$fpQMtncRvf8S$n3XmosswKzC3ERp8IBfP+rup9S2g4Zk/MNLKiy9DQ4k=",
+            "email": "conesus@newsblur.com",
+            "date_joined": "2011-07-18 00:23:49"
+        }
+    },
+    {
+        "pk": 4,
+        "model": "auth.user",
+        "fields": {
+            "username": "Dejal",
+            "first_name": "",
+            "last_name": "",
+            "is_active": true,
+            "is_superuser": false,
+            "is_staff": false,
+            "last_login": "2011-07-18 00:23:49",
+            "groups": [],
+            "user_permissions": [],
+            "password": "pbkdf2_sha256$180000$fpQMtncRvf8S$n3XmosswKzC3ERp8IBfP+rup9S2g4Zk/MNLKiy9DQ4k=",
+            "email": "dejal@newsblur.com",
+            "date_joined": "2011-07-18 00:23:49"
+        }
+    },
+    {
+        "pk": 101,
+        "model": "reader.usersubscriptionfolders",
+        "fields": {
+            "folders": "[{\"Tech\": [1, 4, 5, {\"Deep Tech\": [6, 7]}]}, 2, 3, 8, 9, {\"Blogs\": [8, 9]}, 1]",
+            "user": 3
+        }
+    },
+    {
+        "pk": 102,
+        "model": "reader.usersubscriptionfolders",
+        "fields": {
+            "folders": "[5299728, 644144, 1187026, {\"Brainiacs & Opinion\": [569, 38, 3581, 183139, 1186180, 15]}, {\"Science & Technology\": [731503, 140145, 1272495, 76, 161, 39, {\"Hacker\": [5985150, 3323431]}]}, {\"Humor\": [212379, 3530, 5994357]}, {\"Videos\": [3240, 5168]}]",
+            "user": 4
+        }
+    },
+    {
+        "pk": 101,
+        "model": "reader.usersubscription",
+        "fields": {
+            "feed": 1,
+            "unread_count_updated": "2009-08-01 00:23:42",
+            "mark_read_date": "2009-07-28 23:17:27",
+            "unread_count_neutral": 0,
+            "unread_count_positive": 0,
+            "unread_count_negative": 0,
+            "user": 3,
+            "last_read_date": "2009-07-28 23:17:27"
+        }
+    },
+    {
+        "pk": 102,
+        "model": "reader.usersubscription",
+        "fields": {
+            "feed": 2,
+            "unread_count_updated": "2009-08-01 00:23:42",
+            "mark_read_date": "2009-07-28 23:17:27",
+            "unread_count_neutral": 0,
+            "unread_count_positive": 0,
+            "unread_count_negative": 0,
+            "user": 3,
+            "last_read_date": "2009-07-28 23:17:27"
+        }
+    },
+    {
+        "pk": 103,
+        "model": "reader.usersubscription",
+        "fields": {
+            "feed": 3,
+            "unread_count_updated": "2009-08-01 00:23:42",
+            "mark_read_date": "2009-07-28 23:17:27",
+            "unread_count_neutral": 0,
+            "unread_count_positive": 0,
+            "unread_count_negative": 0,
+            "user": 3,
+            "last_read_date": "2009-07-28 23:17:27"
+        }
+    },
+    {
+        "pk": 104,
+        "model": "reader.usersubscription",
+        "fields": {
+            "feed": 4,
+            "unread_count_updated": "2009-08-01 00:23:42",
+            "mark_read_date": "2009-07-28 23:17:27",
+            "unread_count_neutral": 0,
+            "unread_count_positive": 0,
+            "unread_count_negative": 0,
+            "user": 3,
+            "last_read_date": "2009-07-28 23:17:27"
+        }
+    },
+    {
+        "pk": 105,
+        "model": "reader.usersubscription",
+        "fields": {
+            "feed": 5,
+            "unread_count_updated": "2009-08-01 00:23:42",
+            "mark_read_date": "2009-07-28 23:17:27",
+            "unread_count_neutral": 0,
+            "unread_count_positive": 0,
+            "unread_count_negative": 0,
+            "user": 3,
+            "last_read_date": "2009-07-28 23:17:27"
+        }
+    },
+    {
+        "pk": 106,
+        "model": "reader.usersubscription",
+        "fields": {
+            "feed": 6,
+            "unread_count_updated": "2009-08-01 00:23:42",
+            "mark_read_date": "2009-07-28 23:17:27",
+            "unread_count_neutral": 0,
+            "unread_count_positive": 0,
+            "unread_count_negative": 0,
+            "user": 3,
+            "last_read_date": "2009-07-28 23:17:27"
+        }
+    },
+    {
+        "pk": 107,
+        "model": "reader.usersubscription",
+        "fields": {
+            "feed": 7,
+            "unread_count_updated": "2009-08-01 00:23:42",
+            "mark_read_date": "2009-07-28 23:17:27",
+            "unread_count_neutral": 0,
+            "unread_count_positive": 0,
+            "unread_count_negative": 0,
+            "user": 3,
+            "last_read_date": "2009-07-28 23:17:27"
+        }
+    },
+    {
+        "pk": 108,
+        "model": "reader.usersubscription",
+        "fields": {
+            "feed": 8,
+            "unread_count_updated": "2009-08-01 00:23:42",
+            "mark_read_date": "2009-07-28 23:17:27",
+            "unread_count_neutral": 0,
+            "unread_count_positive": 0,
+            "unread_count_negative": 0,
+            "user": 3,
+            "last_read_date": "2009-07-28 23:17:27"
+        }
+    },
+    {
+        "pk": 109,
+        "model": "reader.usersubscription",
+        "fields": {
+            "feed": 9,
+            "unread_count_updated": "2009-08-01 00:23:42",
+            "mark_read_date": "2009-07-28 23:17:27",
+            "unread_count_neutral": 0,
+            "unread_count_positive": 0,
+            "unread_count_negative": 0,
+            "user": 3,
+            "last_read_date": "2009-07-28 23:17:27"
+        }
+    },
+    {
+        "pk": 110,
+        "model": "reader.usersubscription",
+        "fields": {
+            "feed": 10,
+            "unread_count_updated": "2009-08-01 00:23:42",
+            "mark_read_date": "2009-07-28 23:17:27",
+            "unread_count_neutral": 0,
+            "unread_count_positive": 0,
+            "unread_count_negative": 0,
+            "user": 3,
+            "last_read_date": "2009-07-28 23:17:27"
+        }
+    }
+]

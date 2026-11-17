@@ -1,0 +1,222 @@
+/* ===================== */
+/* = Sideoption - Save = */
+/* ===================== */
+
+.NB-sideoption-save-wrapper {
+    height: 0px;
+    overflow: hidden;
+    display: none;
+}
+
+.NB-sideoption-save-tag ::-moz-selection {
+    background: transparent;
+}
+
+.NB-sideoption-save-tag ::selection {
+    background: transparent;
+}
+
+.NB-sideoption-save-wrapper.NB-active {
+    display: block;
+    height: auto;
+}
+
+.NB-narrow-content .NB-sideoption-save-wrapper {
+    clear: both;
+    width: 100%;
+    margin: 0;
+}
+
+.NB-sideoption-save {
+    padding: 4px 6px 6px;
+    border: 1px solid #DBE6EA;
+    text-align: left;
+    color: var(--nb-legacy-606060);
+}
+
+.NB-sideoption-save .NB-sideoption-save-icon {
+    float: left;
+    margin: 11px 2px 0 0;
+    width: 16px;
+    height: 16px;
+    background: transparent url("/media/img/icons/nouns/tag.svg") no-repeat 0 0;
+    background-size: 14px;
+}
+
+.NB-sideoption-save .NB-sideoption-save-title {
+    font-size: 10px;
+    text-align: left;
+    color: #202020;
+    margin: 12px 0 4px;
+}
+
+.NB-sideoption-save .NB-sideoption-save-tag {
+    width: 100%;
+    margin: 0;
+    -webkit-box-sizing: border-box;
+    -moz-box-sizing: border-box;
+    box-sizing: border-box;
+}
+
+.NB-sideoption-save .NB-sideoption-save-populate {
+    float: right;
+    font-size: 9px;
+    line-height: 11px;
+    padding: 2px 4px;
+    margin: 10px 0 2px 0;
+    border-radius: 2px;
+    background-color: rgba(205, 205, 205, .5);
+    color: white;
+    font-weight: bold;
+    cursor: pointer;
+    display: inline-block;
+}
+
+.NB-sideoption-save .NB-sideoption-save-populate:hover {
+    background-color: rgba(205, 205, 205, .8);
+}
+
+.NB-sideoption-save .NB-sideoption-save-populate:active {
+    background-color: rgba(205, 205, 205, 1);
+}
+
+.NB-tagging-autocomplete.ui-autocomplete {
+    font-size: 11px;
+    width: 150px;
+    overflow-x: hidden;
+}
+.NB-sideoption-share-wrapper.NB-active {
+    display: block;
+    height: 0;
+    width: 100%;
+    overflow: hidden;
+}
+
+.NB-menu-manage .NB-sideoption-share-wrapper {}
+
+.NB-narrow-content .NB-sideoption-share-wrapper.NB-active {
+    clear: both;
+    width: 100%;
+    margin: 0;
+}
+
+.NB-sideoption-share .NB-sideoption-share-crosspost-twitter.NB-active,
+.NB-sideoption-share .NB-sideoption-share-crosspost-twitter:hover {
+    background: transparent url('/media/embed/reader/twitter_service.png') no-repeat center center;
+    background-size: 12px;
+    border-color: #4E8ECD;
+    background-color: rgba(78, 142, 205, .1);
+}
+
+.NB-sideoption-share .NB-sideoption-share-crosspost-facebook.NB-active,
+.NB-sideoption-share .NB-sideoption-share-crosspost-facebook:hover {
+    background: transparent url('/media/embed/reader/facebook_service.png') no-repeat center center;
+    background-size: 12px;
+    border-color: #6884CD;
+    background-color: rgba(104, 132, 205, .1);
+}
+
+.NB-sideoption-save .NB-sideoption-save-message {
+    float: right;
+    opacity: 0;
+    transition: opacity 1s ease-out;
+    margin-top: 12px;
+    font-size: 10px;
+    color: yellowgreen;
+}
+
+.NB-sideoption-save .NB-sideoption-save-message.NB-active {
+    opacity: 1;
+}
+
+.NB-sideoption-save .NB-sideoption-save-notes,
+.NB-sideoption-share .NB-sideoption-share-comments {
+    width: 100%;
+    -webkit-box-sizing: border-box;
+    -moz-box-sizing: border-box;
+    box-sizing: border-box;
+    height: 52px;
+    border-color: #C6C6C6;
+    border-radius: 4px;
+    margin: 0 0 12px;
+}
+
+.NB-sideoption-share .NB-error {
+    font-size: 10px;
+    color: #6A1000;
+    padding: 4px 0 0;
+    line-height: 14px;
+    font-weight: bold;
+}
+
+/* ========================= */
+/* = Sideoption - Discover = */
+/* ========================= */
+
+/* ====================== */
+/* = River Progress Bar = */
+/* ====================== */
+
+#story_taskbar .NB-river-progress {
+    margin: 6px 12px 0;
+    width: 150px;
+    height: 20px;
+}
+
+#story_taskbar .NB-river-progress .NB-river-progress-text {
+    text-transform: uppercase;
+    font-size: 10px;
+    text-align: center;
+    font-weight: bold;
+    color: #304056;
+    text-shadow: 1px 1px 0 var(--nb-legacy-d8d8d8);
+}
+
+#story_taskbar .NB-river-progress .NB-river-progress-bar {
+    width: 150px;
+    height: 8px;
+}
+
+.NB-taskbar-info {
+    flex-grow: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 0;
+}
+
+/* ============== */
+/* = Feed Error = */
+/* ============== */
+
+#story_taskbar .NB-feed-error {
+    margin: 5px 12px 0;
+    height: 20px;
+}
+
+#story_taskbar .NB-feed-error .NB-feed-error-text {
+    font-size: 10px;
+    text-align: center;
+    font-weight: bold;
+    color: #4E0A0B;
+    text-shadow: 1px 1px 0 var(--nb-legacy-d8d8d8);
+    float: left;
+    margin-left: 8px;
+}
+
+#story_taskbar .NB-feed-error-type-proxy .NB-feed-error-text {
+    color: #93927D;
+}
+
+#story_taskbar .NB-feed-error .NB-feed-error-icon {
+    margin: 4px 0 0 0;
+    width: 24px;
+    height: 19px;
+    background: transparent url('/media/embed/reader/warning.png') no-repeat 0 0;
+    float: left;
+}
+
+#story_taskbar .NB-feed-error-type-proxy .NB-feed-error-icon {
+    opacity: .5;
+}
+

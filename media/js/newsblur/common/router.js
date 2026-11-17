@@ -1,0 +1,178 @@
+NEWSBLUR.Router = Backbone.Router.extend({
+
+    routes: {
+        "welcome": "welcome",
+        "add/:tab/:category/:subcategory": "add_site",
+        "add/:tab/:category": "add_site",
+        "add/:tab": "add_site",
+        "add": "add_site",
+        "try/?": "try_site",
+        "site/:site_id/:slug": "site",
+        "site/:site_id/": "site",
+        "site/:site_id": "site",
+        "read": "read",
+        "saved": "starred",
+        "saved/:tag": "starred",
+        "folder/saved": "starred",
+        "folder/saved/:tag": "starred",
+        "folder/:folder_name": "folder",
+        "folder/:folder_name/": "folder",
+        "user/*user": "user"
+    },
+
+    welcome: function () {
+        // No-op: keep URL as /welcome
+    },
+
+    add_site: function (tab, category, subcategory) {
+        var url = $.getQueryString('url');
+        if (url) {
+            // If ?url= parameter is present, open the quick add modal
+            NEWSBLUR.log(["add modal", window.location, url]);
+            NEWSBLUR.reader.open_add_feed_modal({ url: url });
+        } else {
+            // Otherwise open the full Add + Discover page
+            NEWSBLUR.log(["add site", window.location, tab, category, subcategory]);
+            NEWSBLUR.reader.open_add_site({
+                router: true,
+                tab: tab || null,
+                category: category || null,
+                subcategory: subcategory || null
+            });
+        }
+    },
+
+    try_site: function () {
+        NEWSBLUR.log(["try", window.location]);
+    },
+
+    site: function (site_id, slug) {
+        // NEWSBLUR.log(["site", site_id, slug]);
+        site_id = parseInt(site_id, 10);
+        var feed = NEWSBLUR.assets.get_feed(site_id);
+        var query = this.extract_query();
+        if (query) {
+            NEWSBLUR.reader.flags.searching = true;
+            NEWSBLUR.reader.flags.search = query;
+        }
+        if (NEWSBLUR.welcome && NEWSBLUR.welcome.is_mobile()) {
+            NEWSBLUR.welcome.activate_mobile_layout();
+        }
+        if (feed) {
+            NEWSBLUR.reader.open_feed(site_id, { router: true, force: true, search: query });
+        } else {
+            NEWSBLUR.reader.load_feed_in_tryfeed_view(site_id, {
+                router: true,
+                force: true,
+                search: query,
+                feed: {
+                    feed_title: _.string.humanize(slug || "")
+                }
+            });
+        }
+        this.apply_classifier_filter_from_url();
+    },
+
+    read: function () {
+        var options = {
+            router: true
+        };
+        var query = this.extract_query();
+        if (query) {
+            NEWSBLUR.reader.flags.searching = true;
+            NEWSBLUR.reader.flags.search = query;
+            options['search'] = query;
+        }
+        console.log(["read stories", options]);
+        NEWSBLUR.reader.open_read_stories(options);
+    },
+
+    starred: function (tag) {
+        var options = {
+            router: true,
+            tag: tag
+        };
+        var query = this.extract_query();
+        if (query) {
+            NEWSBLUR.reader.flags.searching = true;
+            NEWSBLUR.reader.flags.search = query;
+            options['search'] = query;
+        }
+        console.log(["starred", options, tag]);
+        NEWSBLUR.reader.open_starred_stories(options);
+        this.apply_classifier_filter_from_url();
+    },
+
+    folder: function (folder_name) {
+        folder_name = folder_name.replace(/-/g, ' ');
+        // NEWSBLUR.log(["folder", folder_name]);
+        var options = { router: true };
+        var query = this.extract_query();
+        if (query) {
+            NEWSBLUR.reader.flags.searching = true;
+            NEWSBLUR.reader.flags.search = query;
+            options['search'] = query;
+        }
+        if (NEWSBLUR.welcome && NEWSBLUR.welcome.is_mobile()) {
+            NEWSBLUR.welcome.activate_mobile_layout();
+        }
+
+        if (folder_name == "everything") {
+            NEWSBLUR.reader.open_river_stories(null, null, options);
+        } else if (folder_name == "infrequent") {
+            options.infrequent = NEWSBLUR.assets.preference('infrequent_stories_per_month');
+            NEWSBLUR.reader.open_river_stories(null, null, options);
+        } else {
+            var folder = NEWSBLUR.assets.get_folder(folder_name);
+            if (folder) {
+                NEWSBLUR.reader.open_river_stories(folder.folder_view.$el, folder, options);
+            }
+        }
+        this.apply_classifier_filter_from_url();
+    },
+
+    extract_query: function () {
+        var search = $.getQueryString('search');
+        // Preserve quotes for phrase searches, strip other special characters
+        var sanitized = search && search.replace(/[^\w\s""\u201C\u201D]+/g, " ");
+
+        // console.log('extract_query', search, sanitized);
+
+        return sanitized;
+    },
+
+    // media/js/newsblur/common/router.js — reads classifier_<type> from
+    // the URL query string and re-applies the filter. Called by every
+    // route handler that opens a story list (site, folder, starred,
+    // social). `from_router: true` prevents open_classifier_filter from
+    // pushing a new history entry on top of the one that just arrived.
+    // Delegates parsing to reader.read_classifier_filter_from_url so the
+    // URL shape (classifier_tag, classifier_author, ...) stays owned by
+    // one file.
+    apply_classifier_filter_from_url: function () {
+        var parsed = NEWSBLUR.reader.read_classifier_filter_from_url &&
+            NEWSBLUR.reader.read_classifier_filter_from_url();
+        if (!parsed) return;
+        // Defer so the underlying feed has a chance to load first; the
+        // filter re-issues reload_feed with the classifier params anyway.
+        _.defer(function () {
+            NEWSBLUR.reader.open_classifier_filter(parsed.type, parsed.value, {
+                scope: parsed.scope,
+                folder_name: parsed.folder_name || null,
+                feed_id: parsed.feed_id,
+                river_folder_name: parsed.river_folder_name || null,
+                river_feed_id: parsed.river_feed_id || null,
+                story_hash: parsed.story_hash || null,
+                classifier_scope: parsed.classifier_scope,
+                classifier_folder_name: parsed.classifier_folder_name || null,
+                origin: 'url',
+                from_router: true
+            });
+        });
+    },
+
+    user: function (user) {
+        NEWSBLUR.log(["user", user]);
+    }
+
+});

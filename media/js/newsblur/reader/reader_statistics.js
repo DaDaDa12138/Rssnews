@@ -1,0 +1,417 @@
+NEWSBLUR.ReaderStatistics = function (feed_id, options) {
+    var defaults = {
+        embedded: false,
+        width: 700
+    };
+
+    this.options = $.extend({}, defaults, options);
+    this.model = NEWSBLUR.assets;
+    if (!this.options.embedded) {
+        // Statistics only exist for real feeds. Opening this modal from the manage
+        // menu on a river, folder, or saved story tag passes a string id like 'river:'
+        // or 'starred' that doesn't resolve to a feed, so fall back to the first feed
+        // instead of crashing in initialize_feed. (reader_statistics.js)
+        var feed = feed_id && this.model.get_feed(feed_id);
+        if (!feed || !(feed.is_feed && feed.is_feed())) {
+            feed_id = NEWSBLUR.assets.feeds.first().id;
+        }
+    }
+    this.feed_id = feed_id;
+    if (this.options.embedded) {
+        this.feed = NEWSBLUR.stats_feed;
+    } else {
+        this.feed = this.model.get_feed(feed_id);
+        this.feeds = this.model.get_feeds();
+    }
+    this.first_load = true;
+    this.runner();
+};
+
+NEWSBLUR.ReaderStatistics.prototype = new NEWSBLUR.Modal;
+NEWSBLUR.ReaderStatistics.prototype.constructor = NEWSBLUR.ReaderStatistics;
+
+_.extend(NEWSBLUR.ReaderStatistics.prototype, {
+
+    runner: function () {
+        var self = this;
+
+        this.initialize_feed(this.feed_id);
+        this.make_modal();
+        if (this.options.embedded) {
+            $(".NB-embedded-stats").html(this.$modal);
+        } else {
+            this.open_modal();
+            setTimeout(function () {
+                self.get_stats();
+            }, 50);
+
+            this.$modal.bind('change', $.rescope(this.handle_change, this));
+        }
+    },
+
+    make_modal: function () {
+        var self = this;
+
+        this.$modal = $.make('div', { className: 'NB-modal-statistics NB-modal' }, [
+            (!this.options.embedded && $.make('div', { className: 'NB-modal-feed-chooser-container' }, [
+                this.make_feed_chooser({ skip_starred: true, feed_id: this.feed.id })
+            ])),
+            $.make('div', { className: 'NB-modal-loading' }),
+            (!this.options.embedded && $.make('h2', { className: 'NB-modal-title' }, [
+                $.make('div', { className: 'NB-icon' }),
+                gettext('Statistics &amp; History'),
+                $.make('div', { className: 'NB-icon-dropdown' })
+            ])),
+            $.make('h2', { className: 'NB-modal-subtitle' }, [
+                $.favicon_el(this.feed, {
+                    image_class: 'NB-modal-feed-image feed_favicon',
+                    emoji_class: 'NB-modal-feed-image NB-feed-emoji',
+                    colored_class: 'NB-modal-feed-image NB-feed-icon-colored'
+                }),
+                $.make('div', { className: 'NB-modal-feed-heading' }, [
+                    $.make('span', { className: 'NB-modal-feed-title' }, this.feed.get('feed_title')),
+                    $.make('span', { className: 'NB-modal-feed-subscribers ' + (_.isUndefined(this.feed.get('num_subscribers')) && 'NB-hidden') }, interpolate(ngettext("%(count)s subscriber", "%(count)s subscribers", this.feed.get('num_subscribers')), {count: Inflector.commas(this.feed.get('num_subscribers'))}, true))
+                ])
+            ]),
+            $.make('div', { className: 'NB-modal-statistics-info' })
+        ]);
+
+        var $stats = this.make_stats({
+            'last_update': '',
+            'next_update': '',
+            'loading': true
+        });
+        $('.NB-modal-statistics-info', this.$modal).replaceWith($stats);
+    },
+
+    get_stats: function () {
+        var $loading = $('.NB-modal-loading', this.$modal);
+        $loading.addClass('NB-active');
+
+        this.model.get_feed_statistics(this.feed_id, $.rescope(this.populate_stats, this));
+    },
+
+    populate_stats: function (s, data) {
+        var self = this;
+
+        NEWSBLUR.log(['Stats', data]);
+
+        var $loading = $('.NB-modal-loading', this.$modal);
+        $loading.removeClass('NB-active');
+
+        var $stats = this.make_stats(data);
+        $('.NB-modal-statistics-info', this.$modal).replaceWith($stats);
+        $(".NB-modal-feed-subscribers", this.$modal).removeClass('NB-hidden').text(interpolate(ngettext("%(count)s subscriber", "%(count)s subscribers", data.num_subscribers), {count: Inflector.commas(data.num_subscribers)}, true));
+        var $expires_label = $(".NB-statistics-push-expires-label", this.$modal);
+        var $expires = $(".NB-statistics-push-expires", this.$modal);
+        if (data['push_expires']) {
+            $expires_label.html(gettext("Push expires"));
+            $expires.html(data['push_expires']);
+        } else {
+            $expires_label.html("");
+            $expires.html("");
+        }
+        setTimeout(function () {
+            self.make_chart_count(data);
+            self.make_chart_hours(data);
+            self.make_chart_days(data);
+        }, this.first_load ? 200 : 50);
+
+        if (!this.options.embedded) {
+            setTimeout(function () {
+                $.modal.impl.resize(self.$modal);
+            }, 100);
+        }
+    },
+
+    make_stats: function (data) {
+        var update_interval = NEWSBLUR.utils.calculate_update_interval(data['update_interval_minutes']);
+
+        var $stats = $.make('div', { className: 'NB-modal-statistics-info' }, [
+            ($.make('div', { className: 'NB-statistics-stat NB-statistics-updates' }, [
+                $.make('div', { className: 'NB-statistics-update' }, [
+                    $.make('div', { className: 'NB-statistics-label' }, gettext('Last Update')),
+                    $.make('div', { className: 'NB-statistics-count' }, '&nbsp;' + (data['last_update'] ? interpolate(gettext("%(time)s ago"), {time: data['last_update']}, true) : ''))
+                ]),
+                $.make('div', { className: 'NB-statistics-update' }, [
+                    (data['push'] && $.make('div', { className: 'NB-statistics-realtime' }, [
+                        $.make('div', { className: 'NB-statistics-label' }, [
+                            $.make('img', { src: NEWSBLUR.Globals.MEDIA_URL + '/img/reader/realtime_spinner.gif', className: 'NB-statisics-realtime-spinner' }),
+                            gettext('Real-time')
+                        ]),
+                        $.make('div', { className: 'NB-statistics-count' }, interpolate(gettext("Supplemented by checks every %(value_1)s"), {value_1: update_interval}, true))
+                    ])),
+                    (!data['push'] && $.make('div', [
+                        $.make('div', { className: 'NB-statistics-label' }, gettext('Every')),
+                        $.make('div', { className: 'NB-statistics-count' }, update_interval)
+                    ]))
+                ]),
+                $.make('div', { className: 'NB-statistics-update' }, [
+                    $.make('div', { className: 'NB-statistics-label' }, gettext('Next Update')),
+                    (data.active && $.make('div', { className: 'NB-statistics-count' }, '&nbsp;' + (data['next_update'] ? interpolate(gettext("in %(time)s"), {time: data['next_update']}, true) : ''))),
+                    (!data.active && !data.loading && $.make('div', { className: 'NB-statistics-count' }, gettext("Not active")))
+                ]),
+
+                $.make('div', { className: 'NB-statistics-update' }, [
+                    $.make('div', { className: 'NB-statistics-label' }, gettext('Stories in archive')),
+                    (data['archive_count'] && $.make('div', { className: 'NB-statistics-count', title: interpolate(ngettext("%(count)s byte", "%(count)s bytes", data['fs_size_bytes']), {count: Inflector.commas(data['fs_size_bytes'])}, true) }, '&nbsp;' + interpolate(ngettext("%(count)s story", "%(count)s stories", data['archive_count']), {count: Inflector.commas(data['archive_count'])}, true)))
+                ]),
+
+                ((data.average_stories_per_month == 0 || data.stories_last_month == 0) &&
+                    data.update_interval_minutes > 60 &&
+                    $.make('div', { className: 'NB-statistics-update-explainer' }, [
+                        $.make('b', gettext('Why so infrequently?')),
+                        gettext('This site has published zero stories in the past month or has averaged less than a single story a month. As soon as it starts publishing at least once a month, it will automatically fetch more frequently.')
+                    ])),
+                (data.errors_since_good &&
+                    $.make('div', { className: 'NB-statistics-update-explainer' }, [
+                        $.make('b', gettext('Why is the next update not at the normal rate?')),
+                        gettext('This site has is throwing exceptions and is not in a healthy state. Look at the bottom of this dialog to see the exact status codes for the feed. The more errors for the feed, the longer time taken between fetches.')
+                    ])),
+            ])),
+            $.make('div', { className: 'NB-statistics-stat NB-statistics-history' }, [
+                $.make('div', { className: 'NB-statistics-history-stat' }, [
+                    $.make('div', { className: 'NB-statistics-label' }, gettext('Stories per month'))
+                ]),
+                $.make('canvas', { id: 'NB-statistics-history-count-chart', className: 'NB-statistics-history-count-chart' })
+            ]),
+            $.make('div', { className: 'NB-statistics-stat NB-statistics-history' }, [
+                $.make('div', { className: 'NB-statistics-history-stat' }, [
+                    $.make('div', { className: 'NB-statistics-label' }, gettext('Stories per day'))
+                ]),
+                $.make('canvas', { id: 'NB-statistics-history-days-chart', className: 'NB-statistics-history-days-chart' })
+            ]),
+            $.make('div', { className: 'NB-statistics-stat NB-statistics-history' }, [
+                $.make('div', { className: 'NB-statistics-history-stat' }, [
+                    $.make('div', { className: 'NB-statistics-label' }, gettext('Daily distribution of stories'))
+                ]),
+                $.make('div', { className: 'NB-statistics-history-hours-chart' })
+            ]),
+            (data.classifier_counts && $.make('div', { className: 'NB-statistics-state NB-statistics-classifiers' }, [
+                this.make_classifier_count('tag', data.classifier_counts['tag']),
+                this.make_classifier_count('author', data.classifier_counts['author']),
+                this.make_classifier_count('title', data.classifier_counts['title']),
+                this.make_classifier_count('feed', data.classifier_counts['feed'])
+            ])),
+            ($.make('div', { className: 'NB-statistics-stat NB-statistics-fetches' }, [
+                $.make('div', { className: 'NB-statistics-fetches-half' }, [
+                    $.make('div', { className: 'NB-statistics-label' }, gettext('Feed Fetch')),
+                    $.make('div', this.make_history(data, 'feed_fetch'))
+                ]),
+                $.make('div', { className: 'NB-statistics-fetches-half' }, [
+                    $.make('div', { className: 'NB-statistics-label' }, gettext('Page Fetch')),
+                    $.make('div', this.make_history(data, 'page_fetch'))
+                ]),
+                $.make('div', { className: 'NB-statistics-fetches-half' }, [
+                    $.make('div', { className: 'NB-statistics-label' }, gettext('Feed Push')),
+                    $.make('div', this.make_history(data, 'feed_push')),
+                    $.make('div', { className: 'NB-statistics-label NB-statistics-push-expires-label' }, gettext('Push Expires')),
+                    $.make('div', { className: 'NB-statistics-label NB-statistics-push-expires' })
+                ])
+            ]))
+        ]);
+
+        return $stats;
+    },
+
+    make_classifier_count: function (facet, data) {
+        var self = this;
+        if (!data) return;
+
+        // reader_statistics.js: Facet headings name the classifier type, singular when only one was trained.
+        var facet_titles = {
+            'tag': data.length == 1 ? gettext('Tag') : gettext('Tags'),
+            'author': data.length == 1 ? gettext('Author') : gettext('Authors'),
+            'title': data.length == 1 ? gettext('Title') : gettext('Titles'),
+            'feed': data.length == 1 ? gettext('Feed') : gettext('Feeds')
+        };
+        var $facets = $.make('div', { className: 'NB-statistics-facets' }, [
+            $.make('div', { className: 'NB-statistics-facet-title' }, facet_titles[facet])
+        ]);
+
+        var max = 10;
+        _.each(data, function (v) {
+            if (v.pos > max || v.neg > max) {
+                max = Math.max(v.pos, v.neg);
+            }
+        });
+
+        var max_width = 100;
+        var multiplier = max_width / parseFloat(max, 10);
+        var calculate_width = function (count) {
+            return Math.max(1, multiplier * count);
+        };
+
+        _.each(data, function (counts) {
+            var pos = counts.pos || 0;
+            var neg = counts.neg || 0;
+            var key = counts[facet];
+            if (facet == 'feed') {
+                key = [$.make('div', [
+                    $.favicon_el(self.feed, {
+                        image_class: 'NB-modal-feed-image feed_favicon',
+                        emoji_class: 'NB-modal-feed-image NB-feed-emoji',
+                        colored_class: 'NB-modal-feed-image NB-feed-icon-colored'
+                    }),
+                    $.make('span', { className: 'NB-modal-feed-title' }, self.feed.get('feed_title'))
+                ])];
+            }
+            if (!key || (!pos && !neg)) return;
+            var $facet = $.make('div', { className: 'NB-statistics-facet' }, [
+                (pos && $.make('div', { className: 'NB-statistics-facet-pos' }, [
+                    $.make('div', { className: 'NB-statistics-facet-bar' }).css('width', calculate_width(pos)),
+                    $.make('div', { className: 'NB-statistics-facet-count' }, interpolate(ngettext("%(count)s like", "%(count)s likes", pos), {count: Inflector.commas(pos)}, true)).css('margin-left', calculate_width(pos) + 5)
+                ])),
+                (neg && $.make('div', { className: 'NB-statistics-facet-neg' }, [
+                    $.make('div', { className: 'NB-statistics-facet-bar' }).css('width', calculate_width(neg)),
+                    $.make('div', { className: 'NB-statistics-facet-count' }, interpolate(ngettext("%(count)s dislike", "%(count)s dislikes", neg), {count: Inflector.commas(neg)}, true)).css('margin-right', calculate_width(neg) + 5)
+                ])),
+                $.make('div', { className: 'NB-statistics-facet-separator' }),
+                $.make('div', { className: 'NB-statistics-facet-name' }, key)
+            ]);
+            $facets.append($facet);
+        });
+
+        return $facets;
+    },
+
+    make_history: function (data, fetch_type) {
+        var fetches = data[fetch_type + '_history'];
+        var $history;
+
+        if (!fetches || !fetches.length) {
+            $history = $.make('div', { className: 'NB-history-empty' }, gettext("Nothing recorded."));
+        } else {
+            $history = _.map(fetches, function (fetch) {
+                var feed_ok = _.contains([200, 304], fetch.status_code) || !fetch.status_code;
+                var status_class = feed_ok ? ' NB-ok ' : ' NB-errorcode ';
+                return $.make('div', { className: 'NB-history-fetch' + status_class, title: feed_ok ? '' : fetch.exception }, [
+                    $.make('div', { className: 'NB-history-fetch-date' }, fetch.fetch_date || fetch.push_date),
+                    $.make('div', { className: 'NB-history-fetch-message' }, [
+                        fetch.message,
+                        (fetch.status_code && $.make('div', { className: 'NB-history-fetch-code' }, ' (' + fetch.status_code + ')'))
+                    ])
+                ]);
+            });
+        }
+
+        return $history;
+    },
+
+    make_chart_count: function (data) {
+        var labels = _.map(data['story_count_history'], function (date) {
+            var date_matched = date[0].match(/(\d{4})-(\d{1,2})/);
+            var date = (new Date(parseInt(date_matched[1], 10), parseInt(date_matched[2], 10) - 1));
+            // reader_statistics.js: The page language orders the abbreviated month and year.
+            return date.toLocaleDateString(document.documentElement.lang || undefined, { month: 'short', year: 'numeric' });
+        });
+        if (labels.length > 16) {
+            var cut_size = Math.round(labels.length / 16.0);
+            labels = _.map(labels, function (label, c) {
+                if ((c % cut_size) == 0) return label;
+                return "";
+            });
+        }
+        var values = _.map(data['story_count_history'], function (date) {
+            return date[1];
+        });
+        var points = {
+            labels: labels,
+            datasets: [
+                {
+                    fillColor: "rgba(151,187,205,0.5)",
+                    strokeColor: "rgba(151,187,205,1)",
+                    pointColor: "rgba(151,187,205,1)",
+                    pointStrokeColor: "#fff",
+                    data: values
+                }
+            ]
+        };
+        var $plot = $(".NB-statistics-history-count-chart");
+        var width = $plot.width();
+        var height = $plot.height();
+        $plot.attr('width', width);
+        $plot.attr('height', height);
+        var myLine = new Chart($plot.get(0).getContext("2d")).Line(points, {
+            scaleLabel: "<%= Math.round(value) %>",
+            showTooltips: false,
+            scaleBeginAtZero: true
+        });
+    },
+
+    make_chart_hours: function (data) {
+        var max_count = _.max(data.story_hours_history);
+        var $chart = $.make('table', [
+            $.make('tr', { className: 'NB-statistics-history-chart-hours-row' }, [
+                _.map(_.range(24), function (hour) {
+                    var count = data.story_hours_history[hour] || data.story_hours_history["" + hour] || 0;
+                    var opacity = 1 - (count * 1.0 / max_count);
+                    var theme = NEWSBLUR.assets && NEWSBLUR.assets.theme ? NEWSBLUR.assets.theme() : (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+                    if (theme == 'light') {
+                        return $.make('td', { style: "background-color: rgba(255, 255, 255, " + opacity + ");" });
+                    } else if (theme == 'dark') {
+                        opacity = 1 - opacity;
+                        return $.make('td', { style: "background-color: rgba(151, 187, 205, " + opacity + ");" });
+                    }
+                })
+            ]),
+            $.make('tr', { className: 'NB-statistics-history-chart-hours-text-row' }, [
+                _.compact(_.map(_.range(24), function (hour, count) {
+                    // reader_statistics.js: The page language picks a 12 or 24 hour clock for the hour labels.
+                    var hour_name = new Date(2000, 0, 1, hour).toLocaleTimeString(document.documentElement.lang || undefined, { hour: 'numeric' });
+                    if (hour % 3 == 0) {
+                        return $.make('td', { colSpan: 3 }, hour_name);
+                    }
+                }))
+            ])
+        ]);
+
+        $(".NB-statistics-history-hours-chart", this.$modal).html($chart);
+    },
+
+    make_chart_days: function (data) {
+        var labels = NEWSBLUR.utils.dayNames;
+        var values = _.map(_.range(7), function (day) {
+            return data['story_days_history'][day] || 0;
+        });
+        var points = {
+            labels: labels,
+            datasets: [
+                {
+                    fillColor: "rgba(151,187,205,0.5)",
+                    strokeColor: "rgba(151,187,205,1)",
+                    pointColor: "rgba(151,187,205,1)",
+                    pointStrokeColor: "#fff",
+                    data: values
+                }
+            ]
+        };
+        var $plot = $(".NB-statistics-history-days-chart");
+        var width = $plot.width();
+        var height = $plot.height();
+        $plot.attr('width', width);
+        $plot.attr('height', height);
+
+        var myLine = new Chart($plot.get(0).getContext("2d")).Radar(points, {
+            scaleShowLabelBackdrop: false,
+            showTooltips: false,
+            scaleFontSize: 16
+        });
+    },
+
+    // ===========
+    // = Actions =
+    // ===========
+
+    handle_change: function (elem, e) {
+        var self = this;
+
+        $.targetIs(e, { tagSelector: '.NB-modal-feed-chooser' }, function ($t, $p) {
+            var feed_id = $t.val().replace('feed:', '');
+            self.first_load = false;
+            self.initialize_feed(feed_id);
+            self.get_stats();
+        });
+    }
+
+});

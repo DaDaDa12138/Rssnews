@@ -1,0 +1,1021 @@
+/*
+ * media/css/reader/grid.css
+ *
+ * Grid layout cards and the in-page article reader overlay that opens from a
+ * card (see media/js/newsblur/views/grid_reader_view.js).
+ *
+ * Loaded last in the common stylesheet bundle so the card can override the
+ * shared .NB-story-title rules in core/03-story-titles.css without.
+ */
+
+:root {
+    --nb-card-accent: var(--nb-legacy-5c89c9);
+    --nb-card-surface: var(--nb-legacy-ffffff);
+    --nb-card-surface-alt: var(--nb-legacy-f7f8f5);
+    --nb-card-media-bg: #EDEFF2;
+    --nb-card-border: rgba(16, 24, 40, 0.08);
+    --nb-card-border-strong: rgba(16, 24, 40, 0.16);
+    --nb-card-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+    --nb-card-shadow-hover: 0 8px 24px rgba(16, 24, 40, 0.10);
+    --nb-card-title: #1F2328;
+    --nb-card-title-read: #8A8F98;
+    --nb-card-meta: #A6A3A7;
+    --nb-card-preview: #7A7F88;
+    --nb-card-radius: 12px;
+}
+
+/* ================== */
+/* = Grid container = */
+/* ================== */
+
+#story_titles.NB-layout-grid > .NB-story-titles {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 16px;
+    padding: 20px 24px 32px;
+    background-color: var(--nb-card-surface-alt);
+    align-items: start;
+}
+
+#story_titles.NB-layout-grid.NB-grid-columns-1 > .NB-story-titles {
+    grid-template-columns: minmax(0, 1fr);
+}
+
+#story_titles.NB-layout-grid.NB-grid-columns-2 > .NB-story-titles {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+#story_titles.NB-layout-grid.NB-grid-columns-3 > .NB-story-titles {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+#story_titles.NB-layout-grid.NB-grid-columns-4 > .NB-story-titles {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+#story_titles.NB-layout-grid .NB-story-title-container {
+    min-width: 0;
+}
+
+/* A selected card takes the whole row so its inline story stays readable. */
+#story_titles.NB-layout-grid .NB-story-title-container.NB-selected {
+    grid-column: 1 / -1;
+}
+
+/* ================ */
+/* = Card heights = */
+/* ================ */
+
+.NB-grid-card {
+    height: 420px;
+}
+
+.NB-grid-card-media {
+    height: 190px;
+}
+
+#story_titles.NB-grid-height-xs .NB-grid-card {
+    height: 280px;
+}
+
+#story_titles.NB-grid-height-xs .NB-grid-card-media {
+    height: 120px;
+}
+
+#story_titles.NB-grid-height-s .NB-grid-card {
+    height: 360px;
+}
+
+#story_titles.NB-grid-height-s .NB-grid-card-media {
+    height: 160px;
+}
+
+#story_titles.NB-grid-height-m .NB-grid-card {
+    height: 420px;
+}
+
+#story_titles.NB-grid-height-m .NB-grid-card-media {
+    height: 190px;
+}
+
+#story_titles.NB-grid-height-l .NB-grid-card {
+    height: 480px;
+}
+
+#story_titles.NB-grid-height-l .NB-grid-card-media {
+    height: 210px;
+}
+
+#story_titles.NB-grid-height-xl .NB-grid-card {
+    height: 540px;
+}
+
+#story_titles.NB-grid-height-xl .NB-grid-card-media {
+    height: 240px;
+}
+
+/* ============== */
+/* = Card shell = */
+/* ============== */
+
+.NB-story-title.NB-grid-card {
+    display: flex;
+    flex-direction: column;
+    position: relative;
+    padding: 0;
+    overflow: hidden;
+    font-weight: normal;
+    font-size: 13px;
+    line-height: 1.4;
+    text-decoration: none;
+    text-align: left;
+    color: var(--nb-card-title);
+    background-color: var(--nb-card-surface);
+    border: 1px solid var(--nb-card-border);
+    border-radius: var(--nb-card-radius);
+    box-shadow: var(--nb-card-shadow);
+    transform: none;
+    transition: box-shadow 0.18s ease, border-color 0.18s ease, transform 0.18s ease,
+        background-color 0.18s ease;
+}
+
+.NB-story-title.NB-grid-card:hover:not(.NB-selected),
+.NB-story-title.NB-grid-card.read:hover:not(.NB-selected) {
+    background-color: var(--nb-card-surface);
+    border-color: var(--nb-card-border-strong);
+    box-shadow: var(--nb-card-shadow-hover);
+    transform: translateY(-1px);
+}
+
+.NB-story-title.NB-grid-card.NB-selected {
+    height: auto;
+    overflow: visible;
+    color: var(--nb-card-title);
+    background-color: var(--nb-card-surface);
+    border: 1px solid var(--nb-card-accent);
+    border-radius: var(--nb-card-radius);
+    box-shadow: 0 0 0 3px rgba(92, 137, 201, 0.16);
+    transform: none;
+}
+
+.NB-story-title.NB-grid-card.NB-hidden {
+    display: none;
+}
+
+/* ============== */
+/* = Card media = */
+/* ============== */
+
+.NB-grid-card-media {
+    position: relative;
+    flex: 0 0 auto;
+    overflow: hidden;
+    /* Text-only stories keep the cover slot but wash it in their feed color so
+       a grid of them does not read as a wall of identical grey blocks. The
+       tint variable is set inline by story_title_view.js bind_grid_card_image. */
+    background-color: var(--nb-card-media-bg);
+    background-color: color-mix(in srgb, var(--nb-card-media-tint, var(--nb-card-media-bg)) 16%, var(--nb-card-media-bg));
+    background-image: linear-gradient(135deg, rgba(255, 255, 255, 0.5) 0%, rgba(255, 255, 255, 0) 62%);
+}
+
+.NB-grid-card-image {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    object-position: center;
+    transition: transform 0.4s ease-out, opacity 0.18s ease;
+}
+
+.NB-story-title.NB-grid-card:hover:not(.NB-selected) .NB-grid-card-image {
+    transform: scale(1.02);
+}
+
+.NB-story-title.NB-grid-card.read .NB-grid-card-image {
+    opacity: 0.82;
+}
+
+.NB-grid-card-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    /* The wash lives on .NB-grid-card-media so the tint reaches both cases. */
+    background: none;
+}
+
+.NB-grid-card-placeholder-mark {
+    display: block;
+    width: 32px;
+    height: 32px;
+    background-color: rgba(31, 35, 40, 0.28);
+    -webkit-mask: url('/media/embed/icons/nouns/book-open-text.svg') no-repeat center / 32px 32px;
+    mask: url('/media/embed/icons/nouns/book-open-text.svg') no-repeat center / 32px 32px;
+}
+
+/* Unread marker: the accent dot only shows on unread cards. */
+.NB-grid-card-unread {
+    display: none;
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background-color: var(--nb-card-accent);
+    box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.9);
+    z-index: 1;
+}
+
+.NB-story-title.NB-grid-card:not(.read) .NB-grid-card-unread {
+    display: block;
+}
+
+/* ================ */
+/* = Card actions = */
+/* ================ */
+
+.NB-grid-card-actions {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    display: flex;
+    gap: 0;
+    padding: 2px;
+    border-radius: 10px;
+    background-color: rgba(255, 255, 255, 0.94);
+    box-shadow: 0 2px 8px rgba(16, 24, 40, 0.18);
+    opacity: 0;
+    transform: translateY(-4px);
+    pointer-events: none;
+    transition: opacity 0.16s ease, transform 0.16s ease;
+    z-index: 2;
+}
+
+.NB-story-title.NB-grid-card:hover .NB-grid-card-actions,
+.NB-story-title.NB-grid-card:focus-within .NB-grid-card-actions,
+.NB-story-title.NB-grid-card.NB-story-starred .NB-grid-card-actions {
+    opacity: 1;
+    transform: none;
+    pointer-events: auto;
+}
+
+.NB-grid-card-action {
+    -webkit-appearance: none;
+    appearance: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    margin: 0;
+    border: 0;
+    border-radius: 8px;
+    background-color: transparent;
+    color: #4A4F57;
+    cursor: pointer;
+    transition: background-color 0.14s ease, color 0.14s ease;
+}
+
+.NB-grid-card-action:hover {
+    background-color: rgba(16, 24, 40, 0.07);
+    color: var(--nb-card-accent);
+}
+
+.NB-grid-card-action:focus-visible {
+    outline: 2px solid var(--nb-card-accent);
+    outline-offset: 1px;
+}
+
+.NB-grid-card-icon {
+    display: block;
+    width: 15px;
+    height: 15px;
+    background-color: currentColor;
+}
+
+.NB-grid-card-icon-save {
+    -webkit-mask: url('/media/embed/icons/nouns/star.svg') no-repeat center / 15px 15px;
+    mask: url('/media/embed/icons/nouns/star.svg') no-repeat center / 15px 15px;
+}
+
+.NB-grid-card-icon-train {
+    -webkit-mask: url('/media/embed/icons/nouns/train.svg') no-repeat center / 16px 16px;
+    mask: url('/media/embed/icons/nouns/train.svg') no-repeat center / 16px 16px;
+}
+
+.NB-grid-card-icon-more {
+    background-color: transparent;
+    background-image: radial-gradient(circle, currentColor 1.4px, transparent 1.6px);
+    background-size: 5px 5px;
+    background-position: center;
+    background-repeat: repeat-x;
+}
+
+.NB-story-title.NB-grid-card.NB-story-starred .NB-grid-card-save {
+    background-color: var(--nb-card-accent);
+    color: var(--nb-legacy-ffffff);
+}
+
+/* ============= */
+/* = Card body = */
+/* ============= */
+
+.NB-grid-card-body {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+    padding: 12px 14px 8px;
+    overflow: hidden;
+}
+
+.NB-grid-card .NB-story-feed {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    position: static;
+    left: auto;
+    top: auto;
+    width: auto;
+    height: auto;
+    margin: 0 0 6px;
+    font-size: 11px;
+    line-height: 1.2;
+    color: var(--nb-card-meta);
+    transition: none;
+}
+
+.NB-grid-card .NB-story-feed .feed_favicon {
+    position: static;
+    left: auto;
+    top: auto;
+    width: 14px;
+    height: 14px;
+    margin: 0;
+    flex: 0 0 auto;
+}
+
+.NB-grid-card .NB-story-feed .feed_favicon img {
+    display: block;
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
+}
+
+.NB-grid-card .NB-story-feed .feed_title {
+    position: static;
+    left: auto;
+    top: auto;
+    width: auto;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--nb-card-meta);
+}
+
+.NB-grid-card a.story_title {
+    display: block;
+    padding: 0;
+    margin: 0;
+    color: inherit;
+    text-decoration: none;
+    transition: none;
+}
+
+.NB-grid-card .NB-storytitles-star,
+.NB-grid-card .NB-storytitles-sentiment,
+.NB-grid-card .NB-story-manage-icon {
+    display: none;
+}
+
+/* The feed colour spines belong to the list and split views. In the card grid
+   unread is signalled by the dot and the title weight instead. */
+.NB-grid-card .NB-storytitles-feed-border-inner,
+.NB-grid-card .NB-storytitles-feed-border-outer {
+    display: none;
+}
+
+/* Unread cards carry a slightly stronger outline than read ones. */
+.NB-story-title.NB-grid-card:not(.read) {
+    border-color: var(--nb-card-border-strong);
+}
+
+.NB-grid-card .NB-storytitles-title {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    overflow: hidden;
+    font-size: 15px;
+    line-height: 1.35;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--nb-card-title);
+    word-break: break-word;
+    overflow-wrap: break-word;
+}
+
+.NB-story-title.NB-grid-card.read .NB-storytitles-title {
+    color: var(--nb-card-title-read);
+    font-weight: 500;
+}
+
+.NB-grid-card .NB-storytitles-content-preview {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 4;
+    overflow: hidden;
+    margin: 6px 0 0;
+    font-size: 12px;
+    line-height: 1.5;
+    font-weight: normal;
+    color: var(--nb-card-preview);
+    word-break: break-word;
+}
+
+/* Preview density follows the configured card height. */
+#story_titles.NB-grid-height-xs .NB-grid-card .NB-storytitles-title {
+    -webkit-line-clamp: 2;
+}
+
+#story_titles.NB-grid-height-xs .NB-grid-card .NB-storytitles-content-preview {
+    display: none;
+}
+
+#story_titles.NB-grid-height-s .NB-grid-card .NB-storytitles-title {
+    -webkit-line-clamp: 2;
+}
+
+#story_titles.NB-grid-height-s .NB-grid-card .NB-storytitles-content-preview {
+    -webkit-line-clamp: 3;
+}
+
+#story_titles.NB-grid-height-l .NB-grid-card .NB-storytitles-content-preview {
+    -webkit-line-clamp: 5;
+}
+
+#story_titles.NB-grid-height-xl .NB-grid-card .NB-storytitles-title {
+    -webkit-line-clamp: 4;
+}
+
+#story_titles.NB-grid-height-xl .NB-grid-card .NB-storytitles-content-preview {
+    -webkit-line-clamp: 6;
+}
+
+/* =============== */
+/* = Card footer = */
+/* =============== */
+
+.NB-grid-card .NB-grid-card-footer {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 0 0 auto;
+    position: static;
+    margin: 0;
+    padding: 8px 14px 12px;
+    border: 0;
+    background: transparent;
+    font-size: 11px;
+    line-height: 1.3;
+    color: var(--nb-card-meta);
+}
+
+.NB-grid-card .story_date {
+    position: static;
+    width: auto;
+    font-size: 11px;
+    font-weight: normal;
+    color: var(--nb-card-meta);
+    font-variant-numeric: tabular-nums;
+}
+
+.NB-grid-card .NB-storytitles-author {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+    color: var(--nb-card-meta);
+}
+
+.NB-grid-card .NB-middot {
+    opacity: 0.6;
+}
+
+/* The inline detail only appears when a card is selected from the keyboard
+   or from the manage menu; the overlay is the normal reading path. */
+.NB-grid-card .NB-story-detail {
+    flex: 0 0 auto;
+}
+
+/* =================== */
+/* = Article overlay = */
+/* =================== */
+
+.NB-grid-reader {
+    display: none;
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 1200;
+}
+
+.NB-grid-reader.NB-grid-reader-open {
+    display: block;
+}
+
+body.NB-grid-reader-locked {
+    overflow: hidden;
+}
+
+.NB-grid-reader-overlay {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    background-color: rgba(16, 24, 40, 0.38);
+    -webkit-backdrop-filter: blur(3px);
+    backdrop-filter: blur(3px);
+    animation: NB-grid-reader-fade 0.16s ease-out;
+}
+
+.NB-grid-reader-panel {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    display: flex;
+    flex-direction: column;
+    width: 780px;
+    height: min(720px, 78vh);
+    max-width: calc(100vw - 32px);
+    max-height: calc(100vh - 48px);
+    min-height: 320px;
+    overflow: hidden;
+    background-color: var(--nb-card-surface);
+    border-radius: 16px;
+    box-shadow: 0 32px 80px rgba(16, 24, 40, 0.34), 0 2px 8px rgba(16, 24, 40, 0.12);
+    animation: NB-grid-reader-pop 0.18s ease-out;
+}
+
+.NB-grid-reader-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: 0 0 auto;
+    height: 56px;
+    padding: 0 12px 0 18px;
+    border-bottom: 1px solid var(--nb-card-border);
+    background-color: var(--nb-card-surface);
+}
+
+.NB-grid-reader-source {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.NB-grid-reader-favicon {
+    display: flex;
+    align-items: center;
+    flex: 0 0 auto;
+}
+
+.NB-grid-reader-favicon img {
+    display: block;
+    width: 16px;
+    height: 16px;
+    border-radius: 3px;
+}
+
+.NB-grid-reader-feed-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--nb-card-title);
+}
+
+.NB-grid-reader-date {
+    flex: 0 0 auto;
+    font-size: 12px;
+    color: var(--nb-card-meta);
+    white-space: nowrap;
+}
+
+.NB-grid-reader-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: 0 0 auto;
+}
+
+.NB-grid-reader-action {
+    -webkit-appearance: none;
+    appearance: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: 0;
+    border-radius: 8px;
+    background-color: transparent;
+    color: #5B6068;
+    cursor: pointer;
+    transition: background-color 0.14s ease, color 0.14s ease;
+}
+
+.NB-grid-reader-action:hover {
+    background-color: rgba(16, 24, 40, 0.06);
+    color: var(--nb-card-accent);
+}
+
+.NB-grid-reader-action:focus-visible {
+    outline: 2px solid var(--nb-card-accent);
+    outline-offset: 1px;
+}
+
+.NB-grid-reader-icon {
+    display: block;
+    width: 16px;
+    height: 16px;
+    background-color: currentColor;
+}
+
+.NB-grid-reader-icon-original {
+    -webkit-mask: url('/media/embed/icons/nouns/external-link.svg') no-repeat center / 16px 16px;
+    mask: url('/media/embed/icons/nouns/external-link.svg') no-repeat center / 16px 16px;
+}
+
+.NB-grid-reader-icon-close {
+    -webkit-mask: url('/media/embed/icons/nouns/close.svg') no-repeat center / 16px 16px;
+    mask: url('/media/embed/icons/nouns/close.svg') no-repeat center / 16px 16px;
+}
+
+.NB-grid-reader-icon-save {
+    -webkit-mask: url('/media/embed/icons/nouns/star.svg') no-repeat center / 16px 16px;
+    mask: url('/media/embed/icons/nouns/star.svg') no-repeat center / 16px 16px;
+}
+
+.NB-grid-reader-icon-train {
+    -webkit-mask: url('/media/embed/icons/nouns/train.svg') no-repeat center / 17px 17px;
+    mask: url('/media/embed/icons/nouns/train.svg') no-repeat center / 17px 17px;
+}
+
+.NB-grid-reader-save-on {
+    color: var(--nb-card-accent);
+}
+
+.NB-grid-reader-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    background-color: var(--nb-card-surface);
+}
+
+.NB-grid-reader-story {
+    padding: 4px 32px 28px;
+}
+
+.NB-grid-reader-story .NB-feed-story-header {
+    padding: 20px 0 4px;
+}
+
+.NB-grid-reader .NB-grid-reader-story a.NB-feed-story-title {
+    display: block;
+    margin: 10px 0 0;
+    font-size: 26px;
+    line-height: 1.25;
+    font-weight: 700;
+    letter-spacing: -0.015em;
+    color: var(--nb-card-title);
+    text-wrap: balance;
+}
+
+.NB-grid-reader .NB-grid-reader-story a.NB-feed-story-title:hover {
+    color: var(--nb-card-accent);
+}
+
+.NB-grid-reader-story .NB-story-content-container {
+    max-width: 100%;
+    padding: 0;
+}
+
+.NB-grid-reader-story .NB-feed-story-content {
+    font-size: 16px;
+    line-height: 1.65;
+    color: #2C3035;
+}
+
+.NB-grid-reader-story .NB-feed-story-content img,
+.NB-grid-reader-story .NB-feed-story-content video,
+.NB-grid-reader-story .NB-feed-story-content iframe {
+    max-width: 100%;
+    height: auto;
+}
+
+.NB-grid-reader-story .NB-feed-story-content a {
+    color: var(--nb-card-accent);
+}
+
+.NB-grid-reader-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 40vh;
+    font-size: 14px;
+    color: var(--nb-card-meta);
+}
+
+.NB-grid-reader-nav {
+    -webkit-appearance: none;
+    appearance: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: absolute;
+    top: 50%;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    border: 1px solid var(--nb-card-border);
+    border-radius: 50%;
+    background-color: rgba(255, 255, 255, 0.95);
+    color: #3A3F47;
+    box-shadow: 0 6px 18px rgba(16, 24, 40, 0.16);
+    cursor: pointer;
+    transform: translateY(-50%);
+    transition: background-color 0.14s ease, color 0.14s ease;
+}
+
+.NB-grid-reader-nav:hover:not(:disabled) {
+    background-color: var(--nb-legacy-ffffff);
+    color: var(--nb-card-accent);
+}
+
+.NB-grid-reader-nav:disabled {
+    opacity: 0.3;
+    box-shadow: none;
+    cursor: default;
+}
+
+.NB-grid-reader-prev {
+    left: 12px;
+}
+
+.NB-grid-reader-next {
+    right: 12px;
+}
+
+.NB-grid-reader-icon-prev,
+.NB-grid-reader-icon-next {
+    background-color: transparent;
+}
+
+.NB-grid-reader-icon-prev::before,
+.NB-grid-reader-icon-next::before {
+    content: "";
+    display: block;
+    width: 9px;
+    height: 9px;
+    border-left: 2px solid currentColor;
+    border-bottom: 2px solid currentColor;
+}
+
+.NB-grid-reader-icon-prev::before {
+    transform: rotate(45deg);
+    margin-left: 3px;
+}
+
+.NB-grid-reader-icon-next::before {
+    transform: rotate(-135deg);
+    margin-right: 3px;
+}
+
+@keyframes NB-grid-reader-fade {
+    from {
+        opacity: 0;
+    }
+
+    to {
+        opacity: 1;
+    }
+}
+
+@keyframes NB-grid-reader-pop {
+    from {
+        opacity: 0;
+        transform: translate(-50%, -48%) scale(0.985);
+    }
+
+    to {
+        opacity: 1;
+        transform: translate(-50%, -50%) scale(1);
+    }
+}
+
+/* ============ */
+/* = Dark mode = */
+/* ============ */
+
+body.NB-dark {
+    --nb-card-surface: #232526;
+    --nb-card-surface-alt: var(--nb-legacy-191b1c);
+    --nb-card-media-bg: #2A2D2F;
+    --nb-card-border: rgba(255, 255, 255, 0.07);
+    --nb-card-border-strong: rgba(255, 255, 255, 0.16);
+    --nb-card-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --nb-card-shadow-hover: 0 8px 24px rgba(0, 0, 0, 0.45);
+    --nb-card-title: #E6E8EA;
+    --nb-card-title-read: #8B9096;
+    --nb-card-meta: #6F7377;
+    --nb-card-preview: #9BA0A8;
+}
+
+.NB-dark .NB-grid-card-media {
+    background-color: var(--nb-card-media-bg);
+    background-color: color-mix(in srgb, var(--nb-card-media-tint, var(--nb-card-media-bg)) 22%, var(--nb-card-media-bg));
+    background-image: linear-gradient(135deg, rgba(255, 255, 255, 0.05) 0%, rgba(0, 0, 0, 0.12) 100%);
+}
+
+.NB-dark .NB-grid-card-media-empty {
+    background-image: linear-gradient(135deg, rgba(255, 255, 255, 0.05) 0%, rgba(0, 0, 0, 0.12) 100%);
+}
+
+.NB-dark .NB-grid-card-media-empty::after {
+    background-color: rgba(255, 255, 255, 0.18);
+}
+
+.NB-dark .NB-grid-card-placeholder-mark {
+    background-color: rgba(255, 255, 255, 0.18);
+}
+
+.NB-dark .NB-grid-card-unread {
+    box-shadow: 0 0 0 2px rgba(25, 27, 28, 0.9);
+}
+
+.NB-dark .NB-grid-card-actions {
+    background-color: rgba(35, 37, 38, 0.94);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+}
+
+.NB-dark .NB-grid-card-action {
+    background-color: transparent;
+    color: #C9CCD1;
+}
+
+.NB-dark .NB-grid-card-action:hover {
+    background-color: rgba(255, 255, 255, 0.09);
+    color: var(--nb-legacy-ffffff);
+}
+
+.NB-dark .NB-story-title.NB-grid-card.NB-selected {
+    box-shadow: 0 0 0 3px rgba(92, 137, 201, 0.28);
+}
+
+.NB-dark .NB-grid-reader-overlay {
+    background-color: rgba(0, 0, 0, 0.6);
+}
+
+.NB-dark .NB-grid-reader-action {
+    color: #A9AEB5;
+}
+
+.NB-dark .NB-grid-reader-action:hover {
+    background-color: rgba(255, 255, 255, 0.08);
+    color: var(--nb-legacy-ffffff);
+}
+
+.NB-dark .NB-grid-reader-story .NB-feed-story-content {
+    color: #C7CACF;
+}
+
+.NB-dark .NB-grid-reader-nav {
+    background-color: rgba(35, 37, 38, 0.95);
+    color: #D6D9DD;
+    border-color: rgba(255, 255, 255, 0.1);
+}
+
+.NB-dark .NB-grid-reader-nav:hover:not(:disabled) {
+    background-color: #2E3134;
+    color: var(--nb-legacy-ffffff);
+}
+
+/* ============== */
+/* = Responsive = */
+/* ============== */
+
+@media (max-width: 1200px) {
+    #story_titles.NB-layout-grid.NB-grid-columns-4 > .NB-story-titles {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 900px) {
+    #story_titles.NB-layout-grid.NB-grid-columns-4 > .NB-story-titles,
+    #story_titles.NB-layout-grid.NB-grid-columns-3 > .NB-story-titles {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .NB-grid-reader-story {
+        padding: 4px 20px 24px;
+    }
+
+    .NB-grid-reader-story .NB-feed-story-title {
+        font-size: 22px;
+    }
+}
+
+@media (max-width: 620px) {
+    #story_titles.NB-layout-grid > .NB-story-titles {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 12px;
+        padding: 12px 12px 24px;
+    }
+
+    .NB-grid-reader-panel {
+        width: 100vw;
+        max-width: 100vw;
+        max-height: 100vh;
+        height: 100vh;
+        border-radius: 0;
+    }
+
+    .NB-grid-reader-nav {
+        display: none;
+    }
+
+    .NB-grid-reader-date {
+        display: none;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .NB-story-title.NB-grid-card,
+    .NB-grid-card-image,
+    .NB-grid-card-actions,
+    .NB-grid-card-action,
+    .NB-grid-reader-overlay,
+    .NB-grid-reader-panel {
+        animation: none;
+        transition: none;
+    }
+
+    .NB-story-title.NB-grid-card:hover:not(.NB-selected) {
+        transform: none;
+    }
+
+    .NB-story-title.NB-grid-card:hover:not(.NB-selected) .NB-grid-card-image {
+        transform: none;
+    }
+}
+
+/* ========================= */
+/* = Cards without a cover = */
+/* ========================= */
+
+/* story_title_view.js leaves .NB-grid-card-media out when a story has no usable
+   image. The card keeps the same height as its neighbours (the height variants
+   above still apply) so the grid stays on one rhythm; the text starts at the top
+   and the footer stays pinned to the bottom. */
+#story_titles .NB-grid-card.NB-grid-card-no-media .NB-grid-card-body {
+    /* Clears the hover action pill that floats at the card's top-right corner. */
+    padding-top: 46px;
+}
+
+/* Without a cover the body owns the whole card, so the summary can run longer
+   instead of leaving a hole above the footer. */
+#story_titles.NB-grid-height-xs .NB-grid-card.NB-grid-card-no-media .NB-storytitles-content-preview {
+    display: -webkit-box;
+    -webkit-line-clamp: 7;
+}
+
+#story_titles.NB-grid-height-s .NB-grid-card.NB-grid-card-no-media .NB-storytitles-content-preview {
+    -webkit-line-clamp: 11;
+}
+
+#story_titles.NB-grid-height-m .NB-grid-card.NB-grid-card-no-media .NB-storytitles-content-preview {
+    -webkit-line-clamp: 13;
+}
+
+#story_titles.NB-grid-height-l .NB-grid-card.NB-grid-card-no-media .NB-storytitles-content-preview {
+    -webkit-line-clamp: 17;
+}
+
+#story_titles.NB-grid-height-xl .NB-grid-card.NB-grid-card-no-media .NB-storytitles-content-preview {
+    -webkit-line-clamp: 18;
+}

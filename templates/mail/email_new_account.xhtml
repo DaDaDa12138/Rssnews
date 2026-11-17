@@ -1,0 +1,16 @@
+{% extends "mail/email_base.xhtml" %}
+
+{% load i18n utils_tags %}
+
+{% block body %}
+    {% current_domain as domain %}
+    <h2 style="color: #282F33; font-size: 18px; font-weight: bold;">
+        {% blocktrans trimmed with username=user.username %}Welcome to NewsBlur, {{ username }}.{% endblocktrans %}
+    </h2>
+    <p style="line-height: 20px;">{% trans "Thanks for trying out NewsBlur! I hope NewsBlur can make your daily reading more personal and intelligent." %}</p>
+    <p style="line-height: 20px;">{% trans "Here are some ways to make NewsBlur work for you:" %}</p>
+    <p style="line-height: 20px;">{% trans "I made NewsBlur because I wanted a better way to read the news and talk about it with people. I hope you love it, too." %}</p>
+    <p>- <a href="https://x.com/samuelclay">Sam Clay</a></p>
+{% endblock %}
+
+{% block resources_header %}{% trans "If you enjoy using NewsBlur, these resources might be of interest to you:" %}{% endblock resources_header %}

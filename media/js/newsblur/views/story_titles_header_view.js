@@ -1,0 +1,348 @@
+NEWSBLUR.Views.StoryTitlesHeader = Backbone.View.extend({
+
+    el: ".NB-story-titles-header",
+
+    options: {
+        'layout': 'split'
+    },
+
+    events: {
+        "click .NB-feedbar-options": "open_options_popover",
+        "click .NB-feedbar-mark-feed-read": "mark_folder_as_read",
+        "click .NB-feedbar-mark-feed-read-expand": "expand_mark_read",
+        "click .NB-feedbar-mark-feed-read-time": "mark_folder_as_read_days",
+        "click .NB-story-title-indicator": "show_hidden_story_titles"
+    },
+
+    initialize: function () {
+        this.$story_titles_feedbar = $(".NB-story-titles-header");
+        this.$feed_view_feedbar = $(".NB-feed-story-view-header");
+
+        // if (this.options.layout == 'split' || this.options.layout == 'list') {
+        this.$story_titles_feedbar.show();
+        this.$feed_view_feedbar.hide();
+        // } else if (this.options.layout == 'full') {
+        //     this.$story_titles_feedbar.hide();
+        //     this.$feed_view_feedbar.show();
+        //     this.setElement(this.$feed_view_feedbar);
+        // }
+    },
+
+    // story_titles_header_view.js: folder and river names get dir="auto" so a name in another
+    // script keeps its punctuation and truncates at its own end (see reader_rtl.css).
+    render: function (options) {
+        var $view;
+        this.options = _.extend({}, this.options, options);
+        this.showing_fake_folder = NEWSBLUR.reader.flags['river_view'] &&
+            NEWSBLUR.reader.active_folder &&
+            (NEWSBLUR.reader.active_folder.get('fake') || !NEWSBLUR.reader.active_folder.get('folder_title'));
+
+        if (NEWSBLUR.reader.flags['starred_view']) {
+            $view = $(_.template('\
+                <div class="NB-folder NB-no-hover">\
+                    <div class="NB-feedbar-options-container">\
+                        <span class="NB-feedbar-options">\
+                            <div class="NB-icon"></div>\
+                            <%- setting_label(NEWSBLUR.assets.view_setting("starred", "order")) %>\
+                        </span>\
+                    </div>\
+                    <div class="NB-folder-icon">\
+                        <img class="feed_favicon" src="<%= $.favicon("starred") %>">\
+                    </div>\
+                    <div class="NB-feedlist-manage-icon" role="button"></div>\
+                    <span class="folder_title_text" dir="auto"><%= folder_title %></span>\
+                </div>\
+            ')({
+                folder_title: NEWSBLUR.reader.feed_title(),
+                setting_label: this.setting_label
+            }));
+        } else if (NEWSBLUR.reader.active_feed == "read") {
+            $view = $(_.template('\
+                <div class="NB-folder NB-no-hover">\
+                    <div class="NB-feedbar-options-container">\
+                        <span class="NB-feedbar-options">\
+                            <div class="NB-icon"></div>\
+                            <%- setting_label(NEWSBLUR.assets.view_setting("read", "order")) %>\
+                        </span>\
+                    </div>\
+                    <div class="NB-folder-icon">\
+                        <img class="feed_favicon" src="<%= $.favicon("read") %>">\
+                    </div>\
+                    <div class="NB-feedlist-manage-icon" role="button"></div>\
+                    <div class="folder_title_text" dir="auto"><%= folder_title %></div>\
+                </div>\
+            ')({
+                folder_title: NEWSBLUR.reader.feed_title(),
+                setting_label: this.setting_label
+            }));
+        } else if (this.showing_fake_folder) {
+            $view = $(_.template('\
+                <div class="NB-folder NB-no-hover NB-folder-<%= all_stories ? "river" : "fake" %>">\
+                    <div class="NB-feedbar-mark-feed-read-container">\
+                        <div class="NB-feedbar-mark-feed-read"><div class="NB-icon"></div></div>\
+                        <div class="NB-feedbar-mark-feed-read-time" data-days="1">1d</div>\
+                        <div class="NB-feedbar-mark-feed-read-time" data-days="3">3d</div>\
+                        <div class="NB-feedbar-mark-feed-read-time" data-days="7">7d</div>\
+                        <div class="NB-feedbar-mark-feed-read-time" data-days="14">14d</div>\
+                        <div class="NB-feedbar-mark-feed-read-expand"></div>\
+                    </div>\
+                    <% if (show_options) { %>\
+                        <div class="NB-feedbar-options-container">\
+                            <span class="NB-feedbar-options">\
+                                <div class="NB-icon"></div>\
+                                <% \
+                                  var start_date = NEWSBLUR.reader.flags.date_filter_start;\
+                                  var end_date = NEWSBLUR.reader.flags.date_filter_end;\
+                                  if (start_date && end_date) { %>\
+                                    <% if (start_date === end_date) { %>\
+                                    <%- interpolate(gettext("Stories on %(date)s"), {date: start_date}, true) %>\
+                                    <% } else { %>\
+                                    <%- interpolate(gettext("Stories from %(start_date)s to %(end_date)s"), {start_date: start_date, end_date: end_date}, true) %>\
+                                    <% } %>\
+                                    &middot;\
+                                <% } else if (start_date) { %>\
+                                  <%- interpolate(gettext("Stories newer than %(date)s"), {date: start_date}, true) %>\
+                                  &middot;\
+                                <% } else if (end_date) { %>\
+                                  <%- interpolate(gettext("Stories older than %(date)s"), {date: end_date}, true) %>\
+                                  &middot;\
+                                <% } %>\
+                                <%- setting_label(read_filter) %>\
+                                &middot;\
+                                <%- setting_label(folder_id ? NEWSBLUR.assets.view_setting(folder_id, "order") : "newest") %>\
+                                <% if (infrequent_stories) { %>\
+                                    &middot;\
+                                    <%- interpolate(ngettext("< %(count)s story/month", "< %(count)s stories/month", infrequent_freq), {count: infrequent_freq}, true) %>\
+                                <% } %>\
+                            </span>\
+                        </div>\
+                    <% } %>\
+                    <div class="NB-story-title-indicator">\
+                        <div class="NB-story-title-indicator-count"></div>\
+                        <span class="NB-story-title-indicator-text"><%- gettext("show hidden stories") %></span>\
+                    </div>\
+                    <div class="NB-folder-icon">\
+                        <%= $.favicon_html(folder_id) %>\
+                    </div>\
+                    <div class="NB-feedlist-manage-icon" role="button"></div>\
+                    <span class="folder_title_text" dir="auto"><%= folder_title %></span>\
+                </div>\
+            ')({
+                folder_title: NEWSBLUR.reader.feed_title(),
+                folder_id: NEWSBLUR.reader.active_feed,
+                read_filter: NEWSBLUR.classifier_filter_utils.read_filter_for_matching_view(
+                    NEWSBLUR.reader.active_feed ?
+                        NEWSBLUR.assets.view_setting(NEWSBLUR.reader.active_feed, "read_filter") :
+                        "unread",
+                    NEWSBLUR.reader.flags['classifier_filter']
+                ),
+                all_stories: NEWSBLUR.reader.active_feed == "river:" || NEWSBLUR.reader.active_feed == "river:infrequent",
+                infrequent_stories: NEWSBLUR.reader.active_feed == "river:infrequent",
+                infrequent_freq: NEWSBLUR.assets.preference('infrequent_stories_per_month'),
+                show_options: !NEWSBLUR.reader.active_folder.get('fake') ||
+                    NEWSBLUR.reader.active_folder.get('show_options'),
+                setting_label: this.setting_label
+            }));
+        } else if (NEWSBLUR.reader.flags['river_view'] &&
+            NEWSBLUR.reader.active_folder &&
+            NEWSBLUR.reader.active_folder.get('folder_title')) {
+            this.view = new NEWSBLUR.Views.Folder({
+                model: NEWSBLUR.reader.active_folder,
+                collection: NEWSBLUR.reader.active_folder.folder_view.collection,
+                feedbar: true,
+                only_title: true
+            }).render();
+            $view = this.view.$el;
+            this.search_view = this.view.search_view;
+        } else {
+            this.view = new NEWSBLUR.Views.FeedTitleView({
+                model: NEWSBLUR.assets.get_feed(this.options.feed_id),
+                type: 'story'
+            }).render();
+            $view = this.view.$el;
+            this.search_view = this.view.search_view;
+        }
+
+        this.$el.html($view);
+
+        if (NEWSBLUR.reader.flags.searching) {
+            this.focus_search();
+        }
+
+        return this;
+    },
+
+    // story_titles_header_view.js: Display label for read_filter/order view setting identifiers,
+    // which stay untranslated because they are stored preferences and sent to the server.
+    setting_label: function (value) {
+        var labels = {
+            all: gettext("All"),
+            unread: gettext("Unread"),
+            newest: gettext("Newest"),
+            oldest: gettext("Oldest")
+        };
+        return labels[value] || value;
+    },
+
+    remove: function () {
+        if (this.view) {
+            this.view.remove();
+            delete this.view;
+        }
+        // Backbone.View.prototype.remove.call(this);
+    },
+
+    search_has_focus: function () {
+        return this.search_view && this.search_view.has_focus();
+    },
+
+    focus_search: function () {
+        if (!this.search_view) return;
+
+        this.search_view.focus_search();
+    },
+
+    watch_toggled_sidebar: function () {
+        if (NEWSBLUR.reader.flags['sidebar_closed']) {
+            $(".NB-feedbar").addClass("NB-sidebar-closed");
+        } else {
+            $(".NB-feedbar").removeClass("NB-sidebar-closed");
+        }
+    },
+
+    // ===========
+    // = Actions =
+    // ===========
+
+    show_feed_hidden_story_title_indicator: function (is_feed_load) {
+        if (!is_feed_load) return;
+        if (!NEWSBLUR.reader.active_feed) return;
+        if (NEWSBLUR.reader.flags.search) return;
+        if (NEWSBLUR.reader.flags['feed_list_showing_starred']) return;
+        NEWSBLUR.reader.flags['unread_threshold_temporarily'] = null;
+
+        var unread_view_name = NEWSBLUR.reader.get_unread_view_name();
+        var $indicator = this.$('.NB-story-title-indicator');
+        var unread_hidden_stories;
+        if (NEWSBLUR.reader.flags['river_view']) {
+            unread_hidden_stories = NEWSBLUR.reader.active_folder &&
+                NEWSBLUR.reader.active_folder.folders &&
+                NEWSBLUR.reader.active_folder.folders.unread_counts &&
+                NEWSBLUR.reader.active_folder.folders.unread_counts().ng;
+        } else {
+            unread_hidden_stories = NEWSBLUR.assets.active_feed.unread_counts().ng;
+        }
+        var hidden_stories = unread_hidden_stories || !!NEWSBLUR.assets.stories.hidden().length;
+        if (!hidden_stories) {
+            $indicator.hide();
+            return;
+        }
+
+        if (is_feed_load) {
+            $indicator.css({ 'display': 'block', 'opacity': 0 });
+            _.delay(function () {
+                $indicator.animate({ 'opacity': 1 }, { 'duration': 1000, 'easing': 'easeOutCubic' });
+            }, 500);
+        }
+        $indicator.removeClass('unread_threshold_positive')
+            .removeClass('unread_threshold_neutral')
+            .removeClass('unread_threshold_negative')
+            .addClass('unread_threshold_' + unread_view_name);
+    },
+
+    show_hidden_story_titles: function () {
+        var $indicator = this.$('.NB-story-title-indicator');
+        var temp_unread_view_name = NEWSBLUR.reader.get_unread_view_name();
+        var unread_view_name = NEWSBLUR.reader.get_unread_view_name(null, true);
+        var hidden_stories_at_threshold = NEWSBLUR.assets.stories.any(function (story) {
+            var score = story.score();
+            if (temp_unread_view_name == 'positive') return score == 0;
+            else if (temp_unread_view_name == 'neutral') return score < 0;
+        });
+        var hidden_stories_below_threshold = temp_unread_view_name == 'positive' &&
+            NEWSBLUR.assets.stories.any(function (story) {
+                return story.score() < 0;
+            });
+
+        // NEWSBLUR.log(['show_hidden_story_titles', hidden_stories_at_threshold, hidden_stories_below_threshold, unread_view_name, temp_unread_view_name, NEWSBLUR.reader.flags['unread_threshold_temporarily']]);
+
+        // First click, open neutral. Second click, open negative.
+        if (temp_unread_view_name == 'positive' &&
+            hidden_stories_at_threshold &&
+            hidden_stories_below_threshold) {
+            NEWSBLUR.reader.flags['unread_threshold_temporarily'] = 'neutral';
+            NEWSBLUR.reader.show_story_titles_above_intelligence_level({
+                'unread_view_name': 'neutral',
+                'animate': true,
+                'follow': true
+            });
+            $indicator.removeClass('unread_threshold_positive')
+                .removeClass('unread_threshold_negative');
+            $indicator.addClass('unread_threshold_neutral');
+            $(".NB-story-title-indicator-text", $indicator).text(gettext("show hidden stories"));
+        } else if (NEWSBLUR.reader.flags['unread_threshold_temporarily'] != 'negative') {
+            NEWSBLUR.reader.flags['unread_threshold_temporarily'] = 'negative';
+            NEWSBLUR.reader.show_story_titles_above_intelligence_level({
+                'unread_view_name': 'negative',
+                'animate': true,
+                'follow': true
+            });
+            $indicator.removeClass('unread_threshold_positive')
+                .removeClass('unread_threshold_neutral');
+            $indicator.addClass('unread_threshold_negative');
+            // $indicator.animate({'opacity': 0}, {'duration': 500}).css('display', 'none');
+            $(".NB-story-title-indicator-text", $indicator).text(gettext("hide hidden stories"));
+        } else {
+            NEWSBLUR.reader.flags['unread_threshold_temporarily'] = null;
+            NEWSBLUR.reader.show_story_titles_above_intelligence_level({
+                'unread_view_name': unread_view_name,
+                'animate': true,
+                'follow': true
+            });
+            $indicator.removeClass('unread_threshold_positive')
+                .removeClass('unread_threshold_neutral')
+                .removeClass('unread_threshold_negative');
+            $indicator.addClass('unread_threshold_' + unread_view_name);
+            $(".NB-story-title-indicator-text", $indicator).text(gettext("show hidden stories"));
+        }
+    },
+
+    open_options_popover: function (e) {
+        if (!(this.showing_fake_folder ||
+            NEWSBLUR.reader.active_feed == "read" ||
+            NEWSBLUR.reader.flags['starred_view'])) return;
+
+        NEWSBLUR.FeedOptionsPopover.create({
+            anchor: this.$(".NB-feedbar-options"),
+            feed_id: NEWSBLUR.reader.active_feed
+        });
+    },
+
+    mark_folder_as_read: function (e, days_back) {
+        if (!this.showing_fake_folder) return;
+        var self = this;
+        var $container = this.$('.NB-feedbar-mark-feed-read-container');
+        if (NEWSBLUR.reader.should_confirm_mark_read('folder')) {
+            NEWSBLUR.reader.show_mark_read_confirm($container, function () {
+                NEWSBLUR.reader.mark_folder_as_read(undefined, days_back);
+                $container.fadeOut(400);
+            }, { days: days_back });
+            return;
+        }
+        NEWSBLUR.reader.mark_folder_as_read(undefined, days_back);
+        $container.fadeOut(400);
+    },
+
+    mark_folder_as_read_days: function (e) {
+        if (!this.showing_fake_folder) return;
+        var days = parseInt($(e.target).data('days'), 10);
+        this.mark_folder_as_read(e, days);
+    },
+
+    expand_mark_read: function () {
+        if (!this.showing_fake_folder) return;
+        NEWSBLUR.Views.FeedTitleView.prototype.expand_mark_read.call(this);
+    },
+
+});
+

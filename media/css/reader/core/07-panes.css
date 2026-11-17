@@ -1,0 +1,621 @@
+/* ======================= */
+/* = Pane Customizations = */
+/* ======================= */
+
+/* ========================================== */
+/* = CSS grid pane layout (pane_layout.js)   = */
+/* ========================================== */
+
+/* The reader used to be laid out by jquery.layout, which measured every pane and
+   positioned it absolutely. Each of the five layout containers is now a CSS grid
+   whose tracks are written by media/js/newsblur/common/pane_layout.js: the edge
+   pane, an optional resizer and a 1fr centre. */
+
+.NB-pane-layout {
+    display: grid;
+    min-width: 0;
+    min-height: 0;
+}
+
+/* Panes keep their own display value: .left-pane, .right-pane and .content-pane
+   are grid containers themselves, and .content-north is a flex toolbar. */
+.NB-pane-layout > .NB-pane {
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.NB-pane-layout > .NB-pane.NB-pane-hidden {
+    display: none;
+}
+
+/* Below the drawer breakpoint the sidebar is painted off-canvas by modern.css
+   ("the sidebar is a drawer"), so it has to stay rendered while its track is 0. */
+@media (max-width: 768px) {
+    .NB-pane-layout > .left-pane.NB-pane-hidden {
+        display: block;
+    }
+}
+
+/* core/01-base.css hides the scrollable feed list because jquery.layout used to
+   write display:block inline on every pane it managed. The grid shows panes by
+   placing them, so the one pane that stays hidden in the base stylesheet has to
+   be shown here. Do not generalise this to .NB-pane-center: .right-pane and
+   .content-pane are grid containers, and this file loads after 01-base.css. */
+.NB-pane-layout > .left-center-content {
+    display: block;
+}
+
+/* #story_pane is hidden by core/03-story-titles.css and #story_titles is
+   position:fixed there, both because jquery.layout used to place them by hand.
+   #story_pane is only a pane in the split and full layouts, where pane_layout.js
+   gives it the NB-pane class; in the list, grid and magazine layouts the story
+   titles own the whole centre and the reading pane stays hidden. Showing it
+   unconditionally leaves an unplaced grid item whose absolutely positioned
+   children float over the feed list and swallow every click. */
+.NB-pane-layout > #story_titles,
+.NB-pane-layout > #story_pane.NB-pane {
+    display: block;
+}
+
+.NB-pane-layout > #story_pane.NB-pane-hidden,
+.NB-pane-layout > #story_titles.NB-pane-hidden {
+    display: none;
+}
+
+.NB-pane-layout > #story_titles {
+    position: relative;
+    top: auto;
+    left: auto;
+    width: auto;
+    height: auto;
+}
+
+/* core/03-story-titles.css leaves #story_pane position:static, so the absolutely
+   positioned strip inside it (.NB-story-pane-container, width/height 100%) sized
+   itself against .content-pane instead of the pane. Every story view then sat one
+   content-width off to the side, and the strip spilled over the feed list. The
+   pane has to be its own containing block for the strip and its overflow:hidden
+   clipping to line up with the pane the grid gives it. */
+.NB-pane-layout > #story_pane {
+    position: relative;
+}
+
+.left-south {
+    border-top: 1px solid #dbdbda;
+}
+
+.NB-pane-resizer {
+    position: relative;
+    z-index: 7;
+    background-color: transparent;
+    touch-action: none;
+}
+
+.NB-pane-resizer::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    margin: auto;
+    background-color: #e5e5e4;
+    transition: background-color .15s ease;
+}
+
+/* Orientation belongs to the edge, not to the layout: a mixed layout can hold
+   both a west divider and a north divider. */
+.NB-pane-resizer-x {
+    cursor: col-resize;
+}
+
+.NB-pane-resizer-y {
+    cursor: row-resize;
+}
+
+.NB-pane-resizer-x::after {
+    width: 1px;
+}
+
+.NB-pane-resizer-y::after {
+    height: 1px;
+}
+
+.NB-pane-resizer:hover::after,
+.NB-pane-dragging .NB-pane-resizer::after {
+    background-color: #b7c4b2;
+}
+
+.NB-pane-resizer.NB-pane-resizer-hidden {
+    display: none;
+}
+
+.NB-pane-animating {
+    transition: grid-template-columns .32s ease, grid-template-rows .32s ease;
+}
+
+.NB-pane-dragging {
+    user-select: none;
+}form.opml_import_form .section {
+    clear: both;
+    margin: 2px 0px;
+}#progress_container {
+    font-size: .9em;
+    width: 100%;
+    height: 1.25em;
+    position: relative;
+    margin: 3em 0;
+    display: none;
+}
+
+#progress_filename {
+    font-size: .9em;
+    width: 100%;
+}
+
+#progress_bar {
+    width: 100%;
+    border: 1px solid var(--nb-legacy-999);
+}
+
+#progress_indicator {
+    background: #8a9;
+    width: 0;
+    height: 4px;
+}
+
+/* ============== */
+/* = Feed Frame = */
+/* ============== */
+
+.NB-feed-frame {}
+
+/* =============== */
+/* = Splash Pane = */
+/* =============== */
+
+#NB-splash {
+    z-index: 1;
+    position: absolute;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    right: 0;
+    overflow-y: auto;
+    padding: 0 0 32px;
+}
+
+.NB-splash-modules {
+    max-width: 1600px;
+    display: flex;
+    flex-direction: row;
+    flex-flow: row nowrap;
+    position: relative;
+    gap: 24px;
+    padding: 0 24px;
+}
+
+@media screen and (max-width: 1100px) {
+    .NB-splash-modules {
+        display: block;
+    }
+
+    .NB-splash-modules .NB-modules-center,
+    .NB-splash-modules .NB-dashboard-account {
+        max-width: none;
+    }
+
+    .NB-splash-modules .NB-modules-center,
+    .NB-splash-modules .NB-account-wide {
+        margin-right: 0;
+    }
+
+    .NB-splash-modules .NB-dashboard-account {
+        margin: 0 24px;
+    }
+}
+
+.NB-dashboard-columns-single .NB-splash-modules {
+    flex-flow: column;
+}
+
+.NB-dashboard-columns-single .NB-splash-modules .NB-modules-center,
+.NB-dashboard-columns-single .NB-splash-modules .NB-dashboard-account {
+    max-width: none;
+}
+
+.NB-dashboard-columns-single .NB-splash-modules .NB-modules-center,
+.NB-dashboard-columns-single .NB-splash-modules .NB-account-wide {
+    margin-right: 0;
+}
+
+.NB-dashboard-columns-triple .NB-splash-modules {
+    display: block;
+}
+
+.NB-dashboard-columns-triple .NB-splash-modules .NB-modules-center,
+.NB-dashboard-columns-triple .NB-splash-modules .NB-dashboard-account {
+    max-width: none;
+}
+
+.NB-dashboard-columns-triple .NB-dashboard-rivers-left .NB-module-header,
+.NB-dashboard-columns-triple .NB-dashboard-rivers-right .NB-module-header {
+    margin: 0 0 24px;
+}
+
+.NB-density-compact.NB-dashboard-columns-triple .NB-dashboard-rivers-left .NB-module-header,
+.NB-density-compact.NB-dashboard-columns-triple .NB-dashboard-rivers-right .NB-module-header {
+    margin: 0 0 4px;
+}
+
+.NB-dashboard-columns-triple .NB-splash-modules .NB-modules-center,
+.NB-dashboard-columns-triple .NB-splash-modules .NB-account-wide {
+    margin: 24px 0 0;
+}
+
+.NB-density-compact.NB-dashboard-columns-triple .NB-splash-modules {
+    padding: 0;
+}
+
+.NB-density-compact.NB-dashboard-columns-triple .NB-splash-modules .NB-modules-center,
+.NB-density-compact.NB-dashboard-columns-triple .NB-splash-modules .NB-account-wide {
+    margin: 4px 0 0;
+    padding: 0 4px;
+}
+
+.NB-dashboard-columns-triple .NB-splash-modules .NB-dashboard-account {
+    margin: 0 24px;
+}
+
+.NB-dashboard-columns-triple .NB-dashboard-rivers-left,
+.NB-dashboard-columns-triple .NB-dashboard-rivers-right {
+    display: flex;
+    flex-wrap: nowrap;
+    flex-direction: row;
+    align-content: center;
+    justify-content: center;
+    gap: 24px;
+}
+
+.NB-density-compact.NB-dashboard-columns-triple .NB-dashboard-rivers-left,
+.NB-density-compact.NB-dashboard-columns-triple .NB-dashboard-rivers-right {
+    gap: 4px;
+}
+
+.NB-dashboard-columns-triple .NB-dashboard-rivers-left .NB-dashboard-river,
+.NB-dashboard-columns-triple .NB-dashboard-rivers-right .NB-dashboard-river {
+    flex-basis: 100%;
+}
+
+.NB-dashboard-columns-triple .NB-dashboard-rivers-left>*,
+.NB-dashboard-columns-triple .NB-dashboard-rivers-right>* {
+    flex: 1;
+    min-width: 0;
+}
+
+.NB-dashboard-columns-triple .NB-dashboard-rivers-left .NB-feedbar-options,
+.NB-dashboard-columns-triple .NB-dashboard-rivers-right .NB-feedbar-options {
+    text-indent: 258%;
+    white-space: nowrap;
+    overflow: hidden;
+    width: 12px;
+}
+
+.NB-splash-info {
+    width: 100%;
+    height: 55px;
+
+    bottom: 0;
+    position: absolute;
+    right: 0;
+    z-index: 1;
+}
+
+.NB-splash-info.NB-splash-top {
+    top: 0;
+    bottom: inherit;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+}
+
+.NB-body-main .NB-splash-info.NB-splash-top {
+    display: none;
+}
+
+.NB-splash-info.NB-splash-bottom {
+    border-top: 1px solid rgba(0, 0, 0, 0.1);
+    height: 36px;
+    overflow: hidden;
+    background: rgba(243, 245, 241, .7);
+    backdrop-filter: blur(5px);
+}
+
+.NB-splash-info .NB-splash-title {
+    position: absolute;
+    bottom: -1px;
+    width: 282px;
+    height: 54px;
+    right: 166px;
+    z-index: 2;
+}
+
+.NB-splash-info.NB-splash-top .NB-splash-title {
+    top: 0px;
+    bottom: inherit;
+    right: 24px;
+    width: 168px;
+}
+
+.NB-body-main .NB-splash-info.NB-splash-top .NB-splash-title {
+    display: none;
+}
+
+.NB-splash-info .NB-splash-link-logo {
+    display: none;
+}
+
+.NB-body-main .NB-splash-info .NB-splash-link-logo {
+    float: right;
+    display: block;
+    opacity: 0.4;
+}
+
+.NB-splash-blurred-logo {
+    display: block;
+    background: transparent url('/media/embed/logo_144.png') no-repeat center center;
+    background-size: contain;
+    width: 26px;
+    height: 26px;
+}
+
+.NB-static a,
+.NB-splash-link {
+    color: #405BA8;
+    text-decoration: none;
+    font-weight: bold;
+}
+
+.NB-static a:hover,
+.NB-splash-link:hover {
+    color: #A85B40;
+    cursor: pointer;
+}/* ============== */
+/* = Classifier = */
+/* ============== */
+
+#simplemodal-container.NB-full-container.NB-classifier-container .simplemodal-wrap {
+    overflow: hidden;
+}
+
+#simplemodal-container.NB-full-container.NB-classifier-container {
+    max-height: 1000px;
+}
+
+.NB-modal.NB-modal-classifiers {
+    position: relative;
+    overflow: hidden;
+    height: 100%;
+    max-height: 1000px;
+    padding: 18px;
+    display: flex;
+    flex-direction: column;
+    min-width: 760px;
+}
+
+/* Loading indicator positioned top right */
+.NB-modal-classifiers>.NB-modal-loading {
+    position: absolute;
+    top: 18px;
+    right: 18px;
+}
+
+/* Title on its own line at the top */
+.NB-modal.NB-modal-classifiers .NB-modal-title {
+    flex-shrink: 0;
+    margin: 6px 0 20px 0;
+}
+
+/* Header row with subtitle on left, tabs on right */
+.NB-modal-classifiers .NB-modal-header {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    margin-bottom: 0;
+    flex-shrink: 0;
+}
+
+.NB-modal-classifiers .NB-modal-header .NB-modal-subtitle {
+    display: flex;
+    align-items: center;
+    overflow: visible;
+    margin: 0;
+    padding: 8px 0;
+    flex: 1;
+    min-width: 0;
+}
+
+.NB-modal-classifiers .NB-modal-header .NB-modal-subtitle .NB-modal-feed-image {
+    float: none;
+    flex-shrink: 0;
+    margin: 0 8px 0 6px;
+}
+
+.NB-modal-classifiers .NB-modal-header .NB-modal-feed-heading {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 6px;
+    overflow: visible;
+    margin: 0;
+    flex: 1;
+    min-width: 0;
+}
+
+.NB-modal-classifiers .NB-modal-header .NB-modal-feed-title {
+    float: none;
+    display: inline;
+}
+
+.NB-modal-classifiers .NB-modal-header .NB-modal-feed-subscribers {
+    float: none;
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: var(--nb-legacy-808080);
+    background: var(--nb-legacy-e8e8e8);
+    padding: 2px 6px;
+    border-radius: 3px;
+    white-space: nowrap;
+    margin: 0;
+}
+
+.NB-modal-classifiers .NB-modal-header .NB-modal-tabs {
+    float: none;
+    position: relative;
+    bottom: -1px;
+    margin: 0;
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+
+.NB-modal-classifiers .NB-modal-header .NB-modal-tab {
+    border-bottom: 1px solid transparent;
+}
+
+.NB-modal-classifiers .NB-modal-header .NB-modal-tab.NB-active {
+    border-bottom: 1px solid white;
+}
+
+.NB-modal-classifiers .NB-tab {
+    flex: 1;
+    overflow: hidden;
+    min-height: 0;
+    padding-top: 16px;
+    flex-direction: column;
+    display: none;
+}
+
+.NB-modal-classifiers .NB-tab.NB-active {
+    display: flex;
+}
+
+.NB-modal-classifiers form {
+    padding: 12px 12px 36px 0;
+    margin: 1px 0 24px 0;
+    overflow-y: auto;
+    -webkit-box-sizing: border-box;
+    -moz-box-sizing: border-box;
+    box-sizing: border-box;
+}
+
+.NB-classifier {
+    border-radius: 14px;
+}
+
+.NB-classifier .NB-modal-loading {
+    margin: 8px 0px 0 0;
+}
+
+.NB-modal-classifiers .NB-modal-title .NB-icon {
+    background: transparent url("/media/embed/icons/nouns/dialog-trainer.svg") no-repeat center center;
+    background-size: 28px;
+    filter: hue-rotate(140deg) saturate(15);
+}
+
+.NB-modal-classifiers h2.NB-like {
+    color: #007000;
+}
+
+.NB-modal-classifiers h2.NB-dislike {
+    color: #700000;
+}
+
+.NB-modal-classifiers .NB-classifier-facet-disabled {
+    color: var(--nb-legacy-a0a0a0);
+}
+
+.NB-classifiers .NB-classifier.NB-classifier-title.NB-classifier-facet-disabled label {
+    color: var(--nb-legacy-a0a0a0);
+    text-shadow: none;
+}
+
+.NB-modal-classifiers .NB-classifier-title-highlight {
+    margin-bottom: 6px;
+}
+.NB-classifier-title-placeholder,
+.NB-classifier-text-placeholder {
+    color: var(--nb-legacy-b0b0b0);
+    font-style: italic;
+}
+.NB-modal-classifiers .NB-publisher .NB-classifier-authors input {
+    float: none;
+    margin: 4px 6px 0 0;
+}
+
+.NB-modal-classifiers .NB-classifier-container {
+    white-space: nowrap;
+    display: inline-flex;
+    align-items: center;
+    margin: 2px 6px 6px 0;
+}
+
+.NB-modal-classifiers .NB-classifier-container .NB-classifier {
+    margin: 0;
+}
+
+.NB-modal-classifiers .NB-classifier-container .NB-classifier-filter-view-btn {
+    position: static;
+    margin: 0 0 0 2px;
+}
+
+.NB-classifier-container .NB-classifier-count {
+    font-size: 10px;
+    margin: 0 6px 0 2px;
+    color: var(--nb-legacy-a0a0a0);
+}
+
+.NB-modal-classifiers .NB-modal-title .NB-classifier-title-like {
+    color: #3D931B;
+    position: relative;
+    padding-right: 28px;
+}
+
+.NB-modal-classifiers .NB-modal-title .NB-classifier-title-like::after {
+    content: '';
+    position: absolute;
+    right: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 24px;
+    height: 24px;
+    background: url('/media/embed/icons/nouns/thumbs-up.svg') no-repeat center;
+    background-size: 24px;
+    filter: brightness(0) saturate(100%) invert(39%) sepia(96%) saturate(520%) hue-rotate(80deg) brightness(95%) contrast(87%);
+}
+
+.NB-modal-classifiers .NB-modal-title .NB-classifier-title-dislike {
+    color: #932C15;
+    position: relative;
+    padding-right: 28px;
+}
+
+.NB-modal-classifiers .NB-modal-title .NB-classifier-title-dislike::after {
+    content: '';
+    position: absolute;
+    right: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 24px;
+    height: 24px;
+    background: url('/media/embed/icons/nouns/thumbs-down.svg') no-repeat center;
+    background-size: 24px;
+    filter: brightness(0) saturate(100%) invert(12%) sepia(96%) saturate(5400%) hue-rotate(358deg) brightness(85%) contrast(120%);
+}
+
+.NB-modal-classifiers .NB-modal-submit-button {
+    float: left;
+}
+
+.simplemodal-wrap {
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+

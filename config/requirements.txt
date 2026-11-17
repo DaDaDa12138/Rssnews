@@ -1,0 +1,55 @@
+# NewsBlur personal edition
+# Python 3.13 / Django 5.2 LTS. Keep this list to what the kept apps import.
+
+# --- Web framework ---
+Django>=5.2,<5.3
+asgiref>=3.8,<4
+sqlparse>=0.5,<1
+
+# --- Task queue and cache ---
+celery>=5.6,<6
+redis>=5.2,<7
+django-redis>=7,<8
+
+# --- Database drivers ---
+psycopg[binary]>=3.3,<4
+
+# --- WSGI server ---
+gunicorn>=26,<27
+
+# --- Static assets ---
+django-pipeline>=4.1,<5
+lightningcss>=0.3,<0.4
+
+# --- Django helpers ---
+django-extensions>=4,<5
+django-qurl>=0.1,<0.2
+subdomains>=3,<4
+
+# --- Feed fetching and parsing ---
+feedparser>=6,<7
+lxml>=5.3,<7
+lxml_html_clean>=0.4,<1
+beautifulsoup4>=4.12,<5
+soupsieve>=2.6
+chardet>=5,<6
+sgmllib3k>=1.0
+requests>=2.32,<3
+httpx[http2]>=0.28,<0.29
+# Browser TLS fingerprint for feeds behind Cloudflare's bot check (linux.do). See
+# utils/url_safety.py.
+curl_cffi>=0.17,<0.18
+# In-process article extraction, replacing the Node mercury sidecar.
+trafilatura>=2.0,<3
+urllib3>=2.2,<3
+dnspython>=2.7,<3
+url-normalize>=3,<4
+PyYAML>=6,<7
+simplejson>=3.19,<4
+python-dateutil>=2.9,<3
+pytz>=2025.1
+
+# --- Images and process stats ---
+Pillow>=11,<13
+psutil>=6,<8
+attrs>=24

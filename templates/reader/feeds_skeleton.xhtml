@@ -1,0 +1,410 @@
+{% load i18n %}
+
+{% comment %}
+feeds_skeleton.xhtml: fixed icon rail on the inline-start edge. .NB-layout and
+#NB-splash are inset by --nb-rail-w in modern.css, so the rail never overlaps the
+reader panes. Icons come from media/img/icons/nouns/.
+{% endcomment %}
+<nav id="NB-rail" aria-label="{% trans "NewsBlur Dashboard" %}">
+    <a class="NB-rail-logo" href="{% url "index" %}" title="NewsBlur">
+        <span class="NB-rail-logo-mark">N</span>
+    </a>
+
+    <div class="NB-rail-items">
+        <button type="button" class="NB-rail-item" data-rail-action="dashboard"
+                title="{% trans "NewsBlur Dashboard" %}" aria-label="{% trans "NewsBlur Dashboard" %}">
+            <img src="{{ MEDIA_URL }}img/icons/nouns/home.svg" alt="" />
+        </button>
+        <button type="button" class="NB-rail-item" data-rail-action="all"
+                title="{% trans "All Site Stories" %}" aria-label="{% trans "All Site Stories" %}">
+            <img src="{{ MEDIA_URL }}img/icons/nouns/all-stories.svg" alt="" />
+            <span class="NB-rail-badge NB-hidden" data-rail-badge="all"></span>
+        </button>
+        <button type="button" class="NB-rail-item" data-rail-action="saved"
+                title="{% trans "Saved Stories" %}" aria-label="{% trans "Saved Stories" %}">
+            <img src="{{ MEDIA_URL }}img/icons/nouns/saved-stories.svg" alt="" />
+            <span class="NB-rail-badge NB-hidden" data-rail-badge="saved"></span>
+        </button>
+        <button type="button" class="NB-rail-item" data-rail-action="add"
+                title="{% trans "Add Site" %}" aria-label="{% trans "Add Site" %}">
+            <img src="{{ MEDIA_URL }}img/icons/nouns/add.svg" alt="" />
+        </button>
+    </div>
+
+    <div class="NB-rail-footer">
+        <button type="button" class="NB-rail-item NB-rail-item-small" data-rail-action="theme"
+                title="{% trans "Toggle theme" %}" aria-label="{% trans "Toggle theme" %}">
+            <img src="{{ MEDIA_URL }}img/icons/nouns/moon.svg" alt="" />
+        </button>
+        <button type="button" class="NB-rail-item NB-rail-item-small" data-rail-action="filters"
+                title="{% trans "Filters" %}" aria-label="{% trans "Filters" %}">
+            <img src="{{ MEDIA_URL }}img/icons/nouns/dialog-trainer.svg" alt="" />
+        </button>
+        <button type="button" class="NB-rail-item NB-rail-item-small" data-rail-action="preferences"
+                title="{% trans "Preferences" %}" aria-label="{% trans "Preferences" %}">
+            <img src="{{ MEDIA_URL }}img/icons/nouns/settings.svg" alt="" />
+        </button>
+        <button type="button" class="NB-rail-item NB-rail-avatar" data-rail-action="account"
+                title="{{ user.username }}" aria-label="{{ user.username }}">
+            <img src="{{ MEDIA_URL }}img/reader/account_premium_{{ account_images|random }}.jpg" alt="" />
+        </button>
+    </div>
+</nav>
+
+<div class="NB-layout">
+
+    <div class="left-pane">
+
+        <div class="left-north">
+            <div class="NB-feeds-header-user">
+                {# feeds_skeleton.xhtml: dir="auto" isolates the username for RTL and LTR interfaces. #}
+                <div class="NB-feeds-header-user-name" dir="auto">{{ user.username }}</div>
+                <div class="NB-feeds-header-collapse-sidebar" role="button">
+                    <img src="{{ MEDIA_URL }}/img/icons/nouns/nav-left.svg">
+                </div>
+                <div class="NB-feeds-header-dashboard"></div>
+            </div>
+            <div class="NB-feeds-selector">
+                <input type="text" name="feeds_selector" class="NB-feeds-selector-input NB-search-input" />
+                <div class="NB-feedlist-toggle-all-icon" title="{% trans 'Collapse All Folders' %}"></div>
+            </div>
+        </div>
+
+        <div class="left-center">
+
+            <div class="left-center-content NB-sidebar NB-feedlists">
+                <div class="NB-feeds-list-loader">{% trans "Everything is on its way..." %}</div>
+                <div class="NB-feeds-list-error">
+                    {% trans "Something went wrong..." %}
+                    <div class="NB-button NB-feeds-list-retry">{% trans "Retry" %}</div>
+                </div>
+
+                <div class="NB-feeds-header-wrapper">
+
+                    <div class="NB-feeds-header-container NB-feeds-header-tryfeed-container NB-sticky-sidebar-section">
+                        <div class="NB-feeds-header NB-feeds-header-tryfeed">
+                            <img class="NB-feeds-header-icon" src="" />
+                            <div class="NB-feeds-header-title"></div>
+                        </div>
+                    </div>
+
+                    <div class="NB-feeds-header-container NB-feeds-header-river-container NB-feeds-header-river-infrequent-container">
+                        <div class="NB-feeds-header NB-feeds-header-river-infrequent NB-empty" role="link">
+                            <div class="NB-feeds-header-count unread_count"></div>
+                            <img class="NB-feeds-header-icon" src="" />
+                            <div class="NB-feeds-header-title">
+                                {% trans "Infrequent Site Stories" %}
+                            </div>
+                        </div>
+                    </div>
+
+                </div>
+
+                <ul class="folder NB-feedlist" id="feed_list"></ul>
+
+                <div class="NB-feeds-header-container NB-feeds-header-read-container NB-hidden NB-sticky-sidebar-section">
+                    <div class="NB-feeds-header NB-feeds-header-read" role="link">
+                        <img class="NB-feeds-header-icon" src="" />
+                        <div class="NB-feeds-header-title">
+                            {% trans "Read Stories" %}
+                        </div>
+                    </div>
+                </div>
+
+                <div class="NB-feeds-header-container NB-feeds-header-starred-container NB-sticky-sidebar-section">
+                    <div class="NB-feeds-header NB-feeds-header-starred NB-empty" role="link">
+                        <div class="NB-feeds-header-count feed_counts_floater unread_count"></div>
+                        <img class="NB-feeds-header-icon" src="" />
+                        <div class="NB-feedlist-collapse-icon"></div>
+                        <div class="NB-feeds-header-title">
+                            {% trans "Saved Stories" %}
+                        </div>
+                    </div>
+                </div>
+
+                <div class="NB-starred-folder">
+                    <ul class="NB-starred-feeds NB-feedlist"></ul>
+                </div>
+
+                <div class="NB-saved-searches" id="NB-saved-searches">
+                    <div class="NB-saved-searches-header">
+                        <span class="NB-saved-searches-title">{% trans "Saved Searches" %}</span>
+                        <button type="button" class="NB-saved-searches-save NB-hidden"
+                                title="{% trans "Save this search" %}">{% trans "Save" %}</button>
+                    </div>
+                    <ul class="NB-saved-searches-list"></ul>
+                </div>
+
+            </div>
+
+            <div class="left-center-footer">
+                <div id="NB-progress">
+                    <div class="NB-progress-container">
+                        <div class="NB-progress-close"></div>
+                        <div class="NB-progress-title">{% trans "Fetching your feeds" %}</div>
+                        <div class="NB-progress-percentage"></div>
+                        <div class="NB-progress-link"></div>
+                        <div class="NB-progress-counts">
+                            <span class="NB-progress-counts-fetched"></span>
+                            /
+                            <span class="NB-progress-counts-total"></span>
+                        </div>
+                        <div class="NB-progress-bar"></div>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+
+        <div class="left-south">
+            <div class="NB-taskbar-container">
+                <div class="NB-feed-taskbar">
+                    <div class="NB-callout-ftux NB-callout">
+                        <div class="NB-callout-container">
+                            <div class="NB-callout-text"></div>
+                            <div class="NB-callout-arrow"></div>
+                        </div>
+                    </div>
+                    <div class="NB-task-button NB-task-manage NB-disabled" role="button">
+                        <div class="NB-task-image"></div>
+                    </div>
+                    {# feeds_skeleton.xhtml: the manage menu buries Logout under Account, so the sidebar gets a one-click way out. #}
+                    <button type="button" class="NB-task-button NB-task-logout" title="{% trans 'Log Out' %}" aria-label="{% trans 'Log Out' %}">
+                        <svg class="NB-task-image" viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden="true" focusable="false">
+                            <path d="M9 4H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                            <path d="M15 8l4 4-4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                            <path d="M19 12h-9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                        </svg>
+                    </button>
+                    <div class="NB-taskbar-intelligence">
+                        <div class="NB-intelligence-slider">
+                            <ul class="segmented-control">
+                                <li class="NB-intelligence-slider-control NB-intelligence-slider-red" role="button">
+                                    {% trans "All" %}
+                                </li>
+                                <li class="NB-intelligence-slider-control NB-intelligence-slider-yellow" role="button">
+                                    <img src="{{ MEDIA_URL }}embed/icons/nouns/indicator-unread.svg">
+                                    <span class="NB-intelligence-label">{% trans "Unread" %}</span>
+                                </li>
+                                <li class="NB-intelligence-slider-control NB-intelligence-slider-green" role="button">
+                                    <img src="{{ MEDIA_URL }}embed/icons/nouns/indicator-focus.svg">
+                                    <span class="NB-intelligence-label">{% trans "Focus" %}</span>
+                                </li>
+                                <li class="NB-intelligence-slider-control NB-intelligence-slider-blue" role="button">
+                                    <img src="{{ MEDIA_URL }}embed/icons/nouns/saved-stories.svg">
+                                    <span class="NB-intelligence-label">{% trans "Saved" %}</span>
+                                </li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <div class="NB-menu-manage-container"></div>
+
+    <div class="right-pane">
+
+        <div class="NB-feedbar content-north">
+
+            <div class="NB-story-titles-expand-sidebar"></div>
+
+            <div class="NB-toolbar-sidebar-toggle" role="button" title="{% trans 'Show sidebar' %}">
+                <div class="NB-toolbar-sidebar-toggle-image"></div>
+            </div>
+
+            <ul class="segmented-control NB-taskbar NB-taskbar-nav">
+                <li class="NB-taskbar-button NB-task-story-previous" role="button">
+                    <div class="NB-task-image"></div>
+                </li>
+                <li class="NB-taskbar-button NB-task-story-next-unread NB-task-story-next-positive NB-tipsy" tipsy-title="{% trans 'Next unread' %}" role="button">
+                    <div class="NB-task-image"></div>
+                    <span class="NB-task-title">{% trans "Next unread" %}</span>
+                </li>
+                <li class="NB-taskbar-button NB-task-story-next" role="button">
+                    <div class="NB-task-image"></div>
+                </li>
+            </ul>
+
+            <div class="NB-story-titles-header"></div>
+
+            <div class="NB-toolbar-actions" id="story_taskbar">
+
+                <div class="NB-toolbar-search" id="NB-toolbar-search" role="search">
+                    <div class="NB-toolbar-search-icon"></div>
+                    <input type="search" name="toolbar_search" class="NB-toolbar-search-input"
+                           autocomplete="off" placeholder="{% trans 'Search for stories' %}" title="{% trans 'Search operators' %}: title: author: body: url: tag: feed: folder: read: star: date:"
+                           aria-label="{% trans 'Search for stories' %}" />
+                    <button type="button" class="NB-toolbar-search-cancel">{% trans "Cancel" %}</button>
+                </div>
+
+                <button type="button" class="NB-toolbar-refresh NB-tipsy" tipsy-title="{% trans 'Refresh' %}"
+                        aria-label="{% trans 'Refresh' %}">
+                    <span class="NB-toolbar-refresh-icon" aria-hidden="true"></span>
+                </button>
+
+                <ul class="segmented-control NB-taskbar NB-taskbar-view">
+                    <li class="NB-taskbar-button task_view_page NB-tipsy" tipsy-title="{% trans 'Original' context 'story view mode' %}">
+                        <div class="NB-task-image"></div>
+                        <span class="NB-task-title">{% trans "Original" context "story view mode" %}</span>
+                        <div class="NB-task-view-switch-arrow NB-task-view-page-to-feed-arrow"></div>
+                    </li>
+                    <li class="NB-taskbar-button task_view_feed NB-active NB-tipsy" tipsy-title="{% trans 'Feed' context 'story view mode' %}">
+                        <div class="NB-task-image"></div>
+                        <span class="NB-task-title">{% trans "Feed" context "story view mode" %}</span>
+                        <div class="NB-task-view-switch-arrow NB-task-view-to-feed-arrow"></div>
+                    </li>
+                    <li class="NB-taskbar-button task_view_text NB-tipsy" tipsy-title="{% trans 'Text' context 'story view mode' %}">
+                        <div class="NB-task-image"></div>
+                        <span class="NB-task-title">{% trans "Text" context "story view mode" %}</span>
+                        <div class="NB-task-view-switch-arrow NB-task-view-to-text-arrow"></div>
+                    </li>
+                    <li class="NB-taskbar-button task_view_story NB-tipsy" tipsy-title="{% trans 'Story' context 'story view mode' %}">
+                        <div class="NB-task-image"></div>
+                        <span class="NB-task-title">{% trans "Story" context "story view mode" %}</span>
+                        <div class="NB-task-view-switch-arrow NB-task-view-to-story-arrow"></div>
+                    </li>
+                </ul>
+
+                <div class="NB-taskbar-options-container">
+                    <span class="NB-taskbar-options" role="button">
+                        <div class="NB-icon"></div>
+                        {% trans "Style" %}
+                    </span>
+                </div>
+
+                <ul class="segmented-control NB-taskbar NB-taskbar-layout">
+                    <li class="NB-taskbar-button NB-task-layout-full NB-tipsy" tipsy-title="{% trans 'Full' context 'story layout' %}">
+                        <div class="NB-task-image"></div>
+                        <span class="NB-task-title">{% trans "Full" context "story layout" %}</span>
+                    </li>
+                    <li class="NB-taskbar-button NB-task-layout-split NB-active NB-tipsy" tipsy-title="{% trans 'Split' context 'story layout' %}">
+                        <div class="NB-task-image"></div>
+                        <span class="NB-task-title">{% trans "Split" context "story layout" %}</span>
+                    </li>
+                    <li class="NB-taskbar-button NB-task-layout-list NB-tipsy" tipsy-title="{% trans 'List' context 'story layout' %}">
+                        <div class="NB-task-image"></div>
+                        <span class="NB-task-title">{% trans "List" context "story layout" %}</span>
+                    </li>
+                    <li class="NB-taskbar-button NB-task-layout-magazine NB-tipsy" tipsy-title="{% trans 'Magazine' context 'story layout' %}">
+                        <div class="NB-task-image"></div>
+                        <span class="NB-task-title">{% trans "Magazine" context "story layout" %}</span>
+                    </li>
+                    <li class="NB-taskbar-button NB-task-layout-grid NB-tipsy" tipsy-title="{% trans 'Grid' context 'story layout' %}">
+                        <div class="NB-task-image"></div>
+                        <span class="NB-task-title">{% trans "Grid" context "story layout" %}</span>
+                    </li>
+                </ul>
+
+                <button type="button" class="NB-toolbar-layout-toggle" aria-label="{% trans 'Story layout' %}"
+                        aria-haspopup="true" aria-expanded="false" data-layout="list">
+                    <span class="NB-toolbar-layout-toggle-icon" aria-hidden="true"></span>
+                </button>
+
+                <button type="button" class="NB-toolbar-translate NB-tipsy" tipsy-title="{% trans 'Translate' %}"
+                        aria-pressed="false">
+                    <span class="NB-toolbar-translate-icon" aria-hidden="true"></span>
+                    <span class="NB-toolbar-translate-label">{% trans "Translate" %}</span>
+                </button>
+
+                <button type="button" class="NB-toolbar-more" aria-label="{% trans 'More actions' %}"
+                        aria-haspopup="dialog" aria-expanded="false" aria-controls="NB-mobile-sheet">
+                    <span class="NB-toolbar-more-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" focusable="false" aria-hidden="true">
+                            <circle cx="5" cy="12" r="1.7"></circle>
+                            <circle cx="12" cy="12" r="1.7"></circle>
+                            <circle cx="19" cy="12" r="1.7"></circle>
+                        </svg>
+                    </span>
+                </button>
+
+            </div>
+
+        </div>
+
+        <div id="NB-mobile-sheet" class="NB-sheet" role="dialog" aria-modal="true"
+             aria-label="{% trans 'More actions' %}" hidden>
+            <div class="NB-sheet-scrim" data-sheet-dismiss="1"></div>
+            <div class="NB-sheet-panel" role="document" tabindex="-1">
+                <div class="NB-sheet-handle" aria-hidden="true"></div>
+
+                <div class="NB-sheet-group">
+                    <div class="NB-sheet-group-title">{% trans "Story layout" %}</div>
+                    <div class="NB-sheet-segment" role="group" aria-label="{% trans 'Story layout' %}">
+                        <button type="button" data-sheet-layout="full" aria-pressed="false">{% trans "Full" context "story layout" %}</button>
+                        <button type="button" data-sheet-layout="split" aria-pressed="false">{% trans "Split" context "story layout" %}</button>
+                        <button type="button" data-sheet-layout="list" aria-pressed="false">{% trans "List" context "story layout" %}</button>
+                        <button type="button" data-sheet-layout="magazine" aria-pressed="false">{% trans "Magazine" context "story layout" %}</button>
+                        <button type="button" data-sheet-layout="grid" aria-pressed="false">{% trans "Grid" context "story layout" %}</button>
+                    </div>
+                </div>
+
+                <div class="NB-sheet-group">
+                    <div class="NB-sheet-group-title">{% trans "Story view" %}</div>
+                    <div class="NB-sheet-segment" role="group" aria-label="{% trans 'Story view' %}">
+                        <button type="button" data-sheet-view="page" aria-pressed="false">{% trans "Original" context "story view mode" %}</button>
+                        <button type="button" data-sheet-view="feed" aria-pressed="false">{% trans "Feed" context "story view mode" %}</button>
+                        <button type="button" data-sheet-view="text" aria-pressed="false">{% trans "Text" context "story view mode" %}</button>
+                        <button type="button" data-sheet-view="story" aria-pressed="false">{% trans "Story" context "story view mode" %}</button>
+                    </div>
+                </div>
+
+                <div class="NB-sheet-group NB-sheet-rows">
+                    <button type="button" class="NB-sheet-row" data-sheet-action="refresh">
+                        <span class="NB-sheet-row-label">{% trans "Refresh" %}</span>
+                    </button>
+                    <button type="button" class="NB-sheet-row" data-sheet-action="translate" aria-pressed="false">
+                        <span class="NB-sheet-row-label">{% trans "Translate" %}</span>
+                        <span class="NB-sheet-row-state"></span>
+                    </button>
+                    <button type="button" class="NB-sheet-row" data-sheet-action="style">
+                        <span class="NB-sheet-row-label">{% trans "Style" %}</span>
+                    </button>
+                    <button type="button" class="NB-sheet-row" data-sheet-action="mark-read">
+                        <span class="NB-sheet-row-label">{% trans "Mark all as read" %}</span>
+                    </button>
+                </div>
+
+                <button type="button" class="NB-sheet-cancel" data-sheet-dismiss="1">{% trans "Cancel" %}</button>
+            </div>
+        </div>
+
+        <div class="content-pane">
+
+            <div id="story_titles" class="right-north">
+                <div class="NB-story-titles"></div>
+            </div>
+
+            <div id="story_pane" class="content-center">
+                <div id="mouse-indicator">
+                    <div class="NB-callout-mouse-indicator NB-callout">
+                        <div class="NB-callout-container">
+                            <div class="NB-callout-text"></div>
+                            <div class="NB-callout-arrow"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="NB-story-pane-container">
+                    <iframe id="feed_iframe" class="NB-feed-iframe"></iframe>
+                    <div class="NB-feed-story-view NB-view-hidden">
+                        <div class="NB-feed-stories-container">
+                            <div class="NB-feed-story-view-header NB-feedbar"></div>
+                            <ul class="NB-feed-stories"></ul>
+                        </div>
+                    </div>
+                    <div class="NB-text-view">
+                        <div class="NB-text-view-detail"></div>
+                    </div>
+                    <div class="NB-story-view">
+                        <iframe id="story_iframe" class="NB-story-iframe" sandbox="allow-scripts"></iframe>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+
+    </div>
+
+</div>

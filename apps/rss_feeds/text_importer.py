@@ -1,0 +1,481 @@
+import re
+import ssl
+import zlib
+from socket import error as SocketError
+from urllib.parse import urljoin, urlparse
+
+import requests
+import trafilatura
+from bs4 import BeautifulSoup
+from django.utils.encoding import smart_bytes, smart_str
+from lxml.etree import ParserError
+from utils.documents import NotUniqueError
+from urllib3.exceptions import LocationParseError, LocationValueError
+
+from utils import log as logging
+from utils.feed_functions import TimeoutError, timelimit
+from utils.story_functions import _normalize_image_url_for_dedup
+from utils.url_safety import UnsafeUrlError, safe_requests_get, validate_public_url
+from vendor import readability
+from vendor.readability.readability import Unparseable
+
+BROKEN_URLS = [
+    "gamespot.com",
+    "thedailyskip.com",
+]
+
+INVALID_XML_CONTROL_CHARACTERS = dict.fromkeys((*range(0x00, 0x09), 0x0B, 0x0C, *range(0x0E, 0x20)))
+
+# Google answers requests from the EU (where NewsBlur's servers are) with a cookie consent
+# interstitial on these hosts instead of the page asked for. Extracting it yields "We use
+# cookies and data..." as the story text (forum #13827), so a fetch that ends up here is
+# treated as a failure. apps/rss_feeds/text_importer.py
+GOOGLE_CONSENT_HOSTS = ("consent.google.com", "consent.youtube.com")
+
+
+# The opening line of that interstitial, as extracted by Mercury or readability, plus the
+# controls that only the consent page itself carries. Stories fetched before the fix cached
+# it as their original text; see MStory.fetch_original_text. An article that merely quotes
+# the opening line does not match: it also needs the privacy-tools link or both buttons.
+GOOGLE_CONSENT_PHRASE = "We use cookies and data, including IP addresses"
+GOOGLE_CONSENT_MARKERS = ("g.co/privacytools", "Accept all", "Reject all")
+
+
+def is_google_news_url(url):
+    """True for a Google News story link (news.google.com/.../articles/<token>)."""
+    try:
+        parsed = urlparse(url or "")
+    except ValueError:
+        return False
+    return parsed.hostname == "news.google.com" and "/articles/" in parsed.path
+
+
+def is_google_consent_url(url):
+    """True when a fetch was redirected to Google's cookie consent wall."""
+    try:
+        return urlparse(url or "").hostname in GOOGLE_CONSENT_HOSTS
+    except ValueError:
+        return False
+
+
+def is_google_consent_text(text):
+    """True when extracted or cached original text is Google's cookie consent wall: the
+    opening line plus either the privacy-tools link or both the Accept and Reject buttons."""
+    if not text:
+        return False
+    text = smart_str(text)
+    if GOOGLE_CONSENT_PHRASE not in text:
+        return False
+    privacy_link, accept, reject = (marker in text for marker in GOOGLE_CONSENT_MARKERS)
+    return privacy_link or (accept and reject)
+
+
+# A site that blocks NewsBlur's servers answers an article-page request with one of these
+# statuses, or with a 200 whose body is a bot challenge instead of the article. Shared by
+# TextImporter (Text view) and PageImporter (Story view), which fall back to ScrapingBee.
+# The markup markers are specific to Cloudflare's and Anubis's challenge pages. The titles
+# are those pages' own <title> text, compared whole after trimming and lowercasing, so an
+# article headlined "Attention Required at the Border" or "Checking Your Browser Privacy
+# Settings" is still an article. apps/rss_feeds/text_importer.py
+BLOCKED_STATUS_CODES = (403, 429, 503)
+BOT_CHALLENGE_MARKUP = (
+    b"cf-browser-verification",
+    b"_cf_chl",
+    b"cf-challenge",
+    b"challenge-platform",
+    b"anubis-challenge",
+)
+BOT_CHALLENGE_TITLES = (
+    "just a moment...",
+    "attention required! | cloudflare",
+    "making sure you're not a bot!",
+    "making sure you're not a bot",
+)
+PAGE_TITLE_RE = re.compile(rb"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+
+
+def is_bot_challenge_title(title):
+    """True when a page title is, whole, one of the challenge pages' own ("Just a moment...").
+    Whitespace is collapsed and case ignored; a title that merely contains the words is not
+    a match."""
+    if not title:
+        return False
+    normalized = " ".join(smart_str(title, errors="replace").split()).lower()
+    return normalized in BOT_CHALLENGE_TITLES
+
+
+def is_blocked_response(response):
+    """True when an article-page response is the site blocking us rather than the article:
+    a 403, 429 or 503, or a 200 whose first bytes carry challenge-page markup or whose
+    <title> is a challenge page's."""
+    if response.status_code in BLOCKED_STATUS_CODES:
+        return True
+    if response.status_code != 200:
+        return False
+    content_start = (response.content or b"")[:4096].lower()
+    if any(marker in content_start for marker in BOT_CHALLENGE_MARKUP):
+        return True
+    title = PAGE_TITLE_RE.search(content_start)
+    return bool(title) and is_bot_challenge_title(title.group(1))
+
+
+class TextImporter:
+    def __init__(self, story=None, feed=None, story_url=None, request=None, debug=False):
+        self.story = story
+        self.story_url = story_url
+        if self.story and not self.story_url:
+            self.story_url = self.story.story_permalink
+        if self.story_url:
+            from apps.rss_feeds.models import Feed
+
+            self.story_url = Feed.resolve_google_redirect_url(self.story_url)
+            self.story_url = Feed.resolve_google_news_article_url(self.story_url)
+        self.feed = feed
+        self.request = request
+        self.debug = debug
+
+    @property
+    def headers(self):
+        num_subscribers = getattr(self.feed, "num_subscribers", 0)
+        return {
+            "User-Agent": "NewsBlur Content Fetcher - %s subscriber%s - %s %s"
+            % (
+                num_subscribers,
+                "s" if num_subscribers != 1 else "",
+                getattr(self.feed, "permalink", ""),
+                getattr(self.feed, "fake_user_agent", ""),
+            ),
+        }
+
+    def fetch(self, skip_save=False, return_document=False):
+        if self.story_url and any(broken_url in self.story_url for broken_url in BROKEN_URLS):
+            logging.user(self.request, "~SN~FRFailed~FY to fetch ~FGoriginal text~FY: banned")
+            return
+
+        results = self.fetch_trafilatura(skip_save=skip_save, return_document=return_document)
+
+        if not results:
+            logging.user(
+                self.request,
+                "~SN~FRFailed~FY to fetch ~FGoriginal text~FY with trafilatura, trying readability...",
+                warn_color=False,
+            )
+            results = self.fetch_manually(skip_save=skip_save, return_document=return_document)
+
+        return results
+
+    def fetch_trafilatura(self, skip_save=False, return_document=False):
+        # text_importer.py: trafilatura replaced the Mercury sidecar. It runs in process,
+        # needs no extra service, and benchmarks better than readability on article pages.
+        try:
+            resp = self.fetch_request()
+        except TimeoutError:
+            logging.user(self.request, "~SN~FRFailed~FY to fetch ~FGoriginal text~FY: timed out")
+            return
+        except requests.exceptions.TooManyRedirects:
+            logging.user(self.request, "~SN~FRFailed~FY to fetch ~FGoriginal text~FY: too many redirects")
+            return
+
+        if resp is None or is_blocked_response(resp) or resp.status_code >= 400:
+            return
+
+        if is_google_consent_url(getattr(resp, "url", None)):
+            logging.user(
+                self.request,
+                "~SN~FRFailed~FY to fetch ~FGoriginal text~FY: Google consent wall at %s" % resp.url,
+            )
+            return
+
+        try:
+            content = trafilatura.extract(
+                resp.content,
+                url=getattr(resp, "url", self.story_url),
+                include_comments=False,
+                include_tables=True,
+                include_formatting=True,
+                include_links=True,
+                output_format="html",
+            )
+        except Exception as e:
+            logging.user(self.request, "~SN~FRFailed~FY to fetch ~FGoriginal text~FY: %s" % e)
+            return
+
+        if not content:
+            return
+
+        try:
+            metadata = trafilatura.extract_metadata(resp.content)
+        except Exception:
+            metadata = None
+
+        title = getattr(metadata, "title", "") or ""
+        url = getattr(metadata, "url", None) or getattr(resp, "url", self.story_url)
+        image = getattr(metadata, "image", None)
+
+        if is_google_consent_url(url) or (is_google_news_url(self.story_url) and is_google_consent_text(content)):
+            logging.user(
+                self.request, "~SN~FRFailed~FY to fetch ~FGoriginal text~FY: Google consent wall at %s" % url
+            )
+            return
+
+        if is_bot_challenge_title(title):
+            logging.user(
+                self.request, "~SN~FRFailed~FY to fetch ~FGoriginal text~FY: bot challenge page at %s" % url
+            )
+            return
+
+        if image and ("http://" in image[1:] or "https://" in image[1:]):
+            logging.user(self.request, "~SN~FRRemoving broken image from text: %s" % image)
+            image = None
+
+        return self.process_content(
+            content, title, url, image, skip_save=skip_save, return_document=return_document
+        )
+
+    def fetch_manually(self, skip_save=False, return_document=False):
+        try:
+            resp = self.fetch_request()
+        except TimeoutError:
+            logging.user(self.request, "~SN~FRFailed~FY to fetch ~FGoriginal text~FY: timed out")
+            resp = None
+        except requests.exceptions.TooManyRedirects:
+            logging.user(self.request, "~SN~FRFailed~FY to fetch ~FGoriginal text~FY: too many redirects")
+            resp = None
+
+        # A requests.Response is falsy for any 4xx or 5xx, so the check has to be against
+        # None or a 403 would return here before the block detection below ever ran.
+        if resp is None:
+            return
+
+        if is_blocked_response(resp):
+            # Forum #13832: TMZ's CDN answers every article-page request from NewsBlur's
+            # servers with a 403. The feed fetcher already rescues the feed through the paid
+            # proxy, but Text view (and the thumbnails MStory.extract_image_urls saves from it)
+            # came through here with no fallback, so readers got the summary and no images.
+            # A 200 bot challenge page used to be extracted as the article text; now it is
+            # recognized as a block too.
+            # A blocked page carries no article text, so the story keeps its feed
+            # summary. The paid proxy fallback is gone in the personal edition.
+            return
+        elif resp.status_code >= 400:
+            # Any other error page has nothing to extract, which is what the falsy response
+            # used to mean here.
+            return
+
+        if is_google_consent_url(getattr(resp, "url", None)):
+            logging.user(
+                self.request,
+                "~SN~FRFailed~FY to fetch ~FGoriginal text~FY: Google consent wall at %s" % resp.url,
+            )
+            return
+
+        @timelimit(5)
+        def extract_text(resp):
+            try:
+                # When servers don't specify charset in Content-Type header, requests
+                # defaults to ISO-8859-1 per RFC 2616, but most modern sites use UTF-8.
+                # Check if we should try UTF-8 first.
+                encoding = resp.encoding
+                content = resp.content
+
+                # If requests detected ISO-8859-1 (the default when no charset is specified),
+                # check if the HTML declares UTF-8 charset and use that instead
+                if encoding and encoding.lower() in ("iso-8859-1", "latin-1", "latin1"):
+                    # Check for UTF-8 BOM or HTML charset declaration
+                    content_start = content[:1024].lower()
+                    if (
+                        content.startswith(b"\xef\xbb\xbf")  # UTF-8 BOM
+                        or b'charset="utf-8"' in content_start
+                        or b"charset='utf-8'" in content_start
+                        or b"charset=utf-8" in content_start
+                    ):
+                        encoding = "utf-8"
+
+                # Try decoding with the determined encoding
+                try:
+                    text = content.decode(encoding or "utf-8")
+                except (UnicodeDecodeError, LookupError):
+                    # Fall back to UTF-8 with error replacement
+                    text = content.decode("utf-8", errors="replace")
+            except (LookupError, TypeError):
+                text = resp.content
+            return text
+
+        try:
+            text = extract_text(resp)
+        except TimeoutError:
+            logging.user(self.request, "~SN~FRFailed~FY to fetch ~FGoriginal text~FY: timed out on resp.text")
+            return
+
+        # if self.debug:
+        #     logging.user(self.request, "~FBOriginal text's website: %s" % text)
+
+        # if resp.encoding and resp.encoding != 'utf-8':
+        #     try:
+        #         text = text.encode(resp.encoding)
+        #     except (LookupError, UnicodeEncodeError):
+        #         pass
+
+        if text:
+            # text_importer.py: lxml rejects XML 1.0 control characters while rewriting links.
+            text = text.translate(INVALID_XML_CONTROL_CHARACTERS)
+            text = text.replace("\xc2\xa0", " ")  # Non-breaking space, is mangled when encoding is not utf-8
+            text = text.replace("\\u00a0", " ")  # Non-breaking space, is mangled when encoding is not utf-8
+
+        original_text_doc = readability.Document(
+            text, url=resp.url, positive_keywords="post, entry, postProp, article, postContent, postField"
+        )
+        try:
+            content = original_text_doc.summary(html_partial=True)
+        except (ParserError, Unparseable) as e:
+            logging.user(self.request, "~SN~FRFailed~FY to fetch ~FGoriginal text~FY: %s" % e)
+            return
+
+        try:
+            title = original_text_doc.title()
+        except TypeError:
+            title = ""
+
+        url = resp.url
+
+        return self.process_content(
+            content,
+            title,
+            url,
+            image=None,
+            skip_save=skip_save,
+            return_document=return_document,
+            original_text_doc=original_text_doc,
+        )
+
+    def process_content(
+        self, content, title, url, image, skip_save=False, return_document=False, original_text_doc=None
+    ):
+        original_story_content = (
+            self.story and self.story.story_content_z and zlib.decompress(self.story.story_content_z)
+        )
+        if not original_story_content:
+            original_story_content = ""
+        story_image_urls = self.story and self.story.image_urls
+        if not story_image_urls:
+            story_image_urls = []
+
+        content = self.add_hero_image(content, story_image_urls)
+        if content:
+            content = self.rewrite_content(content, base_url=url)
+
+        full_content_is_longer = False
+        if self.feed and self.feed.is_newsletter:
+            full_content_is_longer = True
+        elif len(content) > len(original_story_content):
+            full_content_is_longer = True
+
+        if content and full_content_is_longer:
+            if self.story and not skip_save:
+                self.story.original_text_z = zlib.compress(smart_bytes(content))
+                try:
+                    self.story.save()
+                except NotUniqueError as e:
+                    logging.user(
+                        self.request, ("~SN~FYFetched ~FGoriginal text~FY: %s" % (e)), warn_color=False
+                    )
+            logging.user(
+                self.request,
+                (
+                    "~SN~FYFetched ~FGoriginal text~FY: now ~SB%s bytes~SN vs. was ~SB%s bytes"
+                    % (len(content), len(original_story_content))
+                ),
+                warn_color=False,
+            )
+        else:
+            logging.user(
+                self.request,
+                (
+                    "~SN~FRFailed~FY to fetch ~FGoriginal text~FY: was ~SB%s bytes"
+                    % (len(original_story_content))
+                ),
+                warn_color=False,
+            )
+            return
+
+        if return_document:
+            return dict(content=content, title=title, url=url, doc=original_text_doc, image=image)
+
+        return content
+
+    def add_hero_image(self, content, image_urls):
+        # Need to have images in the original story to add to the text that may not have any images
+        if not len(image_urls):
+            return content
+
+        content_soup = BeautifulSoup(content, features="lxml")
+
+        content_imgs = content_soup.findAll("img")
+        for img in content_imgs:
+            if not img.get("src"):
+                continue
+            img_normalized = _normalize_image_url_for_dedup(img.get("src"))
+            if not img_normalized:
+                continue
+            image_urls = [u for u in image_urls if _normalize_image_url_for_dedup(u) != img_normalized]
+
+        if len(image_urls):
+            image_content = f'<img src="{image_urls[0]}">'
+            content = f"{image_content}\n {content}"
+
+        return content
+
+    def rewrite_content(self, content, base_url=None):
+        # base_url is the address the page was actually served from (after any redirect the
+        # proxy followed); the story link is the fallback. apps/rss_feeds/text_importer.py
+        soup = BeautifulSoup(content, features="lxml")
+
+        for noscript in soup.findAll("noscript"):
+            if len(noscript.contents) > 0:
+                noscript.replaceWith(noscript.contents[0])
+
+        # Make relative image URLs absolute by modifying soup elements directly
+        # (string replacement would corrupt absolute URLs that contain relative paths as substrings)
+        for img in soup.findAll("img"):
+            if "src" in img.attrs:
+                src = img["src"]
+                if not src.startswith(("http://", "https://", "//")):
+                    img["src"] = urljoin(base_url or self.story_url, src)
+
+        return str(soup)
+
+    @timelimit(10)
+    def fetch_request(self):
+        headers = self.headers
+        url = self.story_url
+
+        try:
+            validate_public_url(url)
+        except UnsafeUrlError as e:
+            logging.user(self.request, "~SN~FRFailed~FY to fetch ~FGoriginal text~FY: %s" % e)
+            return
+
+
+        try:
+            r = safe_requests_get(url, headers=headers, timeout=15)
+            if getattr(r, "connection", None):
+                r.connection.close()
+        except (
+            UnsafeUrlError,
+            AttributeError,
+            SocketError,
+            requests.ConnectionError,
+            requests.models.MissingSchema,
+            requests.sessions.InvalidSchema,
+            requests.sessions.TooManyRedirects,
+            requests.models.InvalidURL,
+            requests.models.ChunkedEncodingError,
+            requests.models.ContentDecodingError,
+            requests.adapters.ReadTimeout,
+            LocationValueError,
+            LocationParseError,
+            ssl.SSLError,
+        ) as e:
+            logging.user(self.request, "~SN~FRFailed~FY to fetch ~FGoriginal text~FY: %s" % e)
+            return
+        return r

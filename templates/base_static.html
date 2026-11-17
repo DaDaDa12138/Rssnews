@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% load utils_tags %}
+{% load pipeline %}
+
+{# Account pages: no reader shell, so they load the small static CSS/JS bundles. #}
+{% block stylesheets %}{% include_stylesheets "static" %}{% endblock %}
+{% block head_js %}{% include_javascripts "static_js" %}{% endblock %}

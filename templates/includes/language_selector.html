@@ -1,0 +1,22 @@
+{% load i18n %}
+<form method="post" action="{% url 'language-preference' %}" class="NB-language-selector">
+  {% csrf_token %}
+  <input type="hidden" name="next" value="{{ request.get_full_path }}">
+  <select id="NB-login-language" name="language" data-auto-submit aria-label="{% trans 'Language' %}">
+    <option value="auto" lang="{{ ui_detected_language }}" {% if ui_language_preference == 'auto' %}selected{% endif %}>{{ ui_language_auto_short }} · {{ ui_detected_language_name }}</option>
+    {% for code, name in ui_languages %}
+      <option value="{{ code }}" lang="{{ code }}" {% if ui_language_preference == code %}selected{% endif %}>{{ name }}</option>
+    {% endfor %}
+  </select>
+  <noscript><button type="submit">{% trans "Save" %}</button></noscript>
+  <script nonce="{{ request.csp_nonce }}">
+    // language_selector.html submits on change without an inline event handler, which a
+    // strict script-src policy would block. The noscript button keeps the form usable
+    // when scripts are disabled.
+    document.querySelectorAll('.NB-language-selector select[data-auto-submit]').forEach(function (select) {
+      select.addEventListener('change', function () {
+        this.form.submit();
+      });
+    });
+  </script>
+</form>

@@ -1,0 +1,6088 @@
+/* ==========================================================================
+   NewsBlur modern shell (Inoreader-inspired 2024 refresh)
+
+   Layer order matters: this file is registered in newsblur_web/assets.yml
+   AFTER core/*.css, grid.css and dark/*.css, so plain selectors here win
+   against the legacy sheet without !important. Every color, radius and space
+   comes from tokens.css (--nb-*). Sections:
+
+     1. Base                       13. Responsive
+     2. Shell surfaces             14. Dark tweaks
+     3. Sidebar header             15. Dashboard, menus and modals
+     4. Navigation rail            16. Sidebar footer
+     5. Sidebar tree               17. Popovers
+     6. Feed list rows             18. Dashboard cards
+     7. Toolbar                    19. Sidebar section headers
+     8. Taskbar                    20. Motion budget
+     9. Story list                 21. Folder collapse affordance
+    10. Story content              22. Toolbar density
+    11. Magazine                   23. Image viewer
+    12. Grid cards                 24. Video embeds
+                                   25. Navigation cleanup
+                                   26. Add popover
+                                   27. Phone-width overlays
+                                   28. Translation
+                                   29. Saved searches and filters
+                                   30. Messages
+                                   31. Mobile story bar
+                                   32. Drag to reorder
+                                   33. Disk usage
+                                   34. Feed chooser
+                                   35. Refresh
+                                   36. Search results
+                                   37. Swipe back
+                                   38. Type floor
+                                   39. Empty states
+
+   Users can override anything from Preferences > Custom CSS, which renders in
+   <style id="NB-custom-css"> at the end of <body>, after this file.
+   ========================================================================== */
+
+/* 1. Base ---------------------------------------------------------------- */
+
+body.NB-body-main {
+    background-color: var(--nb-bg);
+    color: var(--nb-text);
+    font-family: var(--nb-font);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+.NB-body-main ::selection {
+    background-color: var(--nb-accent-soft);
+    color: var(--nb-text);
+}
+
+.NB-body-main :focus-visible {
+    outline: 2px solid var(--nb-accent);
+    outline-offset: 2px;
+    border-radius: var(--nb-radius-xs);
+}
+
+/* Slim, neutral scrollbars: the default chrome on Linux is visually noisy. */
+.NB-left-center-content::-webkit-scrollbar,
+.left-center-content::-webkit-scrollbar,
+.NB-story-titles::-webkit-scrollbar,
+#story_pane::-webkit-scrollbar,
+.NB-toolbar-menu::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+
+.left-center-content::-webkit-scrollbar-thumb,
+.NB-story-titles::-webkit-scrollbar-thumb,
+#story_pane::-webkit-scrollbar-thumb,
+.NB-toolbar-menu::-webkit-scrollbar-thumb {
+    background-color: var(--nb-border-strong);
+    border: 3px solid transparent;
+    background-clip: padding-box;
+    border-radius: var(--nb-radius-pill);
+}
+
+.left-center-content::-webkit-scrollbar-thumb:hover,
+.NB-story-titles::-webkit-scrollbar-thumb:hover,
+#story_pane::-webkit-scrollbar-thumb:hover {
+    background-color: var(--nb-meta);
+}
+
+.left-center-content::-webkit-scrollbar-track,
+.NB-story-titles::-webkit-scrollbar-track,
+#story_pane::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+/* 2. Shell surfaces ------------------------------------------------------ */
+
+.left-pane {
+    background-color: var(--nb-surface);
+    border-inline-end: 1px solid var(--nb-border);
+}
+
+.left-center-content {
+    background-color: var(--nb-surface);
+}
+
+.right-pane {
+    background-color: var(--nb-bg);
+}
+
+/* The sidebar publishes its own sticky-row colors, so retheme them here. */
+.NB-sidebar {
+    --nb-sidebar-sticky-feedlist-background: var(--nb-surface);
+    --nb-sidebar-sticky-feedlist-selected-background: var(--nb-accent-soft);
+}
+
+/* 3. Sidebar header ------------------------------------------------------ */
+
+.left-north {
+    background-color: var(--nb-surface);
+    border-bottom: 1px solid var(--nb-border);
+}
+
+.left-south {
+    background-color: var(--nb-surface);
+    border-top: 1px solid var(--nb-border);
+}
+
+.NB-feeds-header-user-name,
+.NB-feeds-header-username {
+    color: var(--nb-text);
+    font-family: var(--nb-font);
+    font-size: var(--nb-fs-3);
+    font-weight: var(--nb-fw-semibold);
+}
+
+/* The legacy strip paints a vertical beige gradient behind the avatar. */
+.NB-feeds-header-user,
+body.NB-dark .NB-feeds-header-user {
+    background-color: transparent;
+    background-image: none;
+}
+
+.NB-feeds-header-user-image img {
+    width: 26px;
+    height: 26px;
+    border-radius: var(--nb-radius-sm);
+}
+
+/* Unread / saved counters under the user name. */
+.NB-feeds-header-dashboard,
+.NB-feeds-header-left {
+    color: var(--nb-meta);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+}
+
+/* 4. Navigation rail ----------------------------------------------------- */
+
+/* The rail is a fixed column on the inline-start edge. It is not part of the
+   jLayout tree, so .NB-layout (absolute, width:100%) and #NB-splash (absolute,
+   inline left/right from dashboard.xhtml) are inset to match. */
+#NB-rail {
+    position: fixed;
+    inset-block: 0;
+    inset-inline-start: 0;
+    z-index: 60;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    box-sizing: border-box;
+    width: var(--nb-rail-w);
+    padding: var(--nb-space-3) 0 var(--nb-space-2);
+    background-color: var(--nb-rail-bg);
+    border-inline-end: 1px solid var(--nb-rail-border);
+    color: var(--nb-rail-fg);
+    font-family: var(--nb-font);
+}
+
+.NB-rail-logo {
+    display: grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    margin-bottom: var(--nb-space-3);
+    border-radius: var(--nb-radius-lg);
+    background-color: var(--nb-legacy-ffffff);
+    color: var(--nb-rail-badge-fg);
+    font-size: var(--nb-fs-6);
+    font-weight: var(--nb-fw-bold);
+    line-height: 1;
+    text-decoration: none;
+}
+
+.NB-rail-logo-mark {
+    line-height: 1;
+    transform: translateY(-1px);
+}
+
+.NB-rail-items,
+.NB-rail-footer {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    width: 100%;
+}
+
+.NB-rail-footer {
+    margin-top: auto;
+    padding-top: var(--nb-space-2);
+}
+
+.NB-rail-item {
+    position: relative;
+    display: grid;
+    place-items: center;
+    row-gap: 2px;
+    width: 46px;
+    height: 48px;
+    padding: 0;
+    border: 0;
+    border-radius: var(--nb-radius-md);
+    background-color: transparent;
+    color: inherit;
+    cursor: pointer;
+    transition: background-color var(--nb-dur-fast) var(--nb-ease);
+}
+
+.NB-rail-item img {
+    width: 20px;
+    height: 20px;
+    opacity: .8;
+    filter: brightness(0) invert(1);
+    transition: opacity var(--nb-dur-fast) var(--nb-ease);
+}
+
+.NB-rail-item:hover {
+    background-color: var(--nb-rail-bg-hover);
+}
+
+.NB-rail-item:hover img {
+    opacity: 1;
+}
+
+.NB-rail-item.NB-active {
+    background-color: var(--nb-rail-bg-active);
+}
+
+.NB-rail-item.NB-active img {
+    opacity: 1;
+}
+
+.NB-rail-item-small {
+    width: 38px;
+    height: 34px;
+}
+
+/* A caption under the glyph rather than a corner pill: the button is only 46px
+   wide, so a 17px badge would cover half of the 20px icon. */
+.NB-rail-badge {
+    position: static;
+    min-width: 0;
+    height: auto;
+    padding: 0;
+    border-radius: 0;
+    background-color: transparent;
+    box-shadow: none;
+    color: var(--nb-rail-fg);
+    font-size: 9px;
+    font-weight: var(--nb-fw-semibold);
+    line-height: 1;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+    opacity: .75;
+    pointer-events: none;
+}
+
+.NB-rail-badge.NB-hidden {
+    display: none;
+}
+
+.NB-rail-avatar {
+    width: 34px;
+    height: 34px;
+    margin-top: var(--nb-space-2);
+    border-radius: 50%;
+    overflow: hidden;
+}
+
+.NB-rail-avatar img {
+    width: 100%;
+    height: 100%;
+    opacity: 1;
+    object-fit: cover;
+    filter: none;
+}
+
+/* Offset the reader from the rail. .NB-layout is absolutely positioned with
+   width:100%, so the width has to shrink alongside the inset. */
+.NB-layout {
+    inset-block-start: 0;
+    inset-inline-start: var(--nb-rail-w);
+    width: calc(100% - var(--nb-rail-w));
+}
+
+/* #NB-splash carries an inline left/right of feed_pane_size (dashboard.xhtml),
+   so a start margin is the one offset that works whichever side it is on. */
+#NB-splash {
+    margin-inline-start: var(--nb-rail-w);
+}
+
+/* 5. Sidebar tree -------------------------------------------------------- */
+
+.NB-feedlist {
+    background-color: var(--nb-surface);
+    font-family: var(--nb-font);
+    font-size: var(--nb-fs-3);
+    padding-bottom: var(--nb-space-2);
+}
+
+.NB-feedlist .feed,
+.NB-feedlist .folder_title {
+    border-radius: var(--nb-radius-sm);
+    margin: 1px 8px;
+    padding: 0;
+    transition: background-color var(--nb-dur-fast) var(--nb-ease);
+}
+
+/* A row is one line tall, so a long title has to end in an ellipsis instead of
+   wrapping. The theme size rules in core/02-feed-list.css:437-455 keep the line
+   height, and without nowrap the second line spilled over the row below it. */
+.NB-feedlist .feed_title {
+    color: var(--nb-text-2);
+    font-size: var(--nb-fs-3);
+    font-weight: var(--nb-fw-normal);
+    line-height: var(--nb-sidebar-row-h);
+    height: var(--nb-sidebar-row-h);
+    padding: 0 34px 0 30px;
+    text-shadow: none;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    transition: color var(--nb-dur-fast) var(--nb-ease);
+}
+
+.NB-feedlist .folder_title {
+    color: var(--nb-text-2);
+    font-size: var(--nb-fs-3);
+    font-weight: var(--nb-fw-medium);
+    letter-spacing: 0;
+    line-height: var(--nb-sidebar-row-h);
+    height: var(--nb-sidebar-row-h);
+    padding: 0 34px 0 30px;
+    text-shadow: none;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.NB-feedlist .feed:hover,
+.NB-feedlist .folder_title:hover {
+    background-color: var(--nb-hover);
+}
+
+.NB-feedlist .feed:hover .feed_title,
+.NB-feedlist .folder_title:hover {
+    color: var(--nb-text);
+}
+
+.NB-feedlist img.feed_favicon {
+    top: calc((var(--nb-sidebar-row-h) - var(--nb-feed-icon-size)) / 2);
+    left: 8px;
+    width: var(--nb-feed-icon-size);
+    height: var(--nb-feed-icon-size);
+    border-radius: var(--nb-radius-xs);
+}
+
+.NB-feedlist .NB-folder-icon {
+    top: calc((var(--nb-sidebar-row-h) - 16px) / 2);
+    left: 8px;
+}
+
+.NB-density-compact .NB-feedlist .feed_title,
+.NB-density-compact .NB-feedlist .folder_title {
+    height: 28px;
+    line-height: 28px;
+}
+
+.NB-density-compact .NB-feedlist img.feed_favicon {
+    top: 6px;
+}
+
+/* Selected feed: quiet accent fill plus a 3px marker, instead of the legacy
+   highlighter yellow. */
+.NB-feedlist .feed.selected,
+.NB-feedlist .feed.NB-selected,
+.NB-feedlist .folder.NB-selected > .folder_title {
+    background-color: var(--nb-accent-soft);
+    border-radius: var(--nb-radius-sm);
+    box-shadow: inset 3px 0 0 var(--nb-accent);
+}
+
+.NB-feedlist .feed.selected .feed_title,
+.NB-feedlist .feed.NB-selected .feed_title,
+.NB-feedlist .folder.NB-selected > .folder_title {
+    color: var(--nb-accent);
+    font-weight: var(--nb-fw-semibold);
+    text-shadow: none;
+}
+
+.NB-feeds-header.NB-selected {
+    background-color: var(--nb-accent-soft);
+}
+
+.NB-feedlist .feed_counts {
+    color: var(--nb-meta);
+    font-size: var(--nb-fs-2);
+    font-variant-numeric: tabular-nums;
+}
+
+.NB-feedlist .feed.NB-unread .feed_counts,
+.NB-feedlist .feed_counts.NB-positive {
+    color: var(--nb-text);
+}
+
+/* 6. Feed list rows ------------------------------------------------------ */
+/* (row rhythm is defined in section 5; kept for future split) */
+
+/* 7. Toolbar ------------------------------------------------------------- */
+/* One row: [sidebar expand] [hamburger] [prev / next unread / next] [title]
+   [search] [view mode] [layout] [style] [fetch status]. The legacy bottom
+   taskbar (#story_taskbar) now lives inside this row, so the story list gets
+   the full viewport height back. */
+
+/* jLayout writes an inline `display: block` on the north pane, so the flex
+   context has to win with !important. Height stays under jLayout's control. */
+.NB-feedbar {
+    display: flex !important;
+    align-items: center;
+    gap: var(--nb-space-1);
+    min-height: var(--nb-toolbar-h);
+    padding: 0 var(--nb-space-3) 0 var(--nb-space-1);
+    background-color: var(--nb-surface);
+    background-image: none;
+    border-bottom: 1px solid var(--nb-border);
+    text-shadow: none;
+}
+
+/* The legacy bottom bar rules (#story_taskbar display:none, 36px tall, top
+   border) no longer describe this element, which is now the toolbar's action
+   cluster. */
+#story_taskbar {
+    display: flex;
+    align-items: center;
+    gap: var(--nb-space-1);
+    flex: 0 0 auto;
+    height: auto;
+    border-top: 0;
+    overflow: visible;
+}
+
+#story_taskbar .NB-taskbar-flex,
+#story_taskbar .NB-taskbar-view {
+    align-self: center;
+    margin: 0;
+}
+
+/* --- Sidebar affordances --- */
+
+.NB-toolbar-sidebar-toggle {
+    display: none;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border-radius: var(--nb-radius-sm);
+    cursor: pointer;
+    flex: 0 0 auto;
+}
+
+.NB-toolbar-sidebar-toggle:hover {
+    background-color: var(--nb-hover);
+}
+
+/* Three bars drawn with gradients so the icon follows the text colour. */
+.NB-toolbar-sidebar-toggle-image {
+    width: 18px;
+    height: 14px;
+    background-image: linear-gradient(var(--nb-text-2), var(--nb-text-2)),
+        linear-gradient(var(--nb-text-2), var(--nb-text-2)),
+        linear-gradient(var(--nb-text-2), var(--nb-text-2));
+    background-size: 18px 2px;
+    background-position: 0 0, 0 6px, 0 12px;
+    background-repeat: no-repeat;
+    opacity: .75;
+}
+
+.NB-story-titles-expand-sidebar {
+    position: static;
+    width: 28px;
+    height: 32px;
+    border: 0;
+    border-radius: var(--nb-radius-sm);
+    background-size: 16px;
+    opacity: .55;
+    flex: 0 0 auto;
+}
+
+.NB-story-titles-expand-sidebar:hover {
+    background-color: var(--nb-hover);
+    opacity: .9;
+}
+
+/* --- Segmented button rows --- */
+
+.NB-feedbar .NB-taskbar-nav,
+.NB-toolbar-actions .NB-taskbar-view,
+.NB-toolbar-actions .NB-taskbar-layout {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    flex: 0 0 auto;
+}
+
+/* Two selectors deep enough to beat the legacy #story_taskbar rules. */
+#story_taskbar .NB-taskbar .NB-taskbar-button,
+.NB-feedbar .NB-taskbar .NB-taskbar-button {
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    margin: 0;
+    border-radius: var(--nb-radius-sm);
+    cursor: pointer;
+    opacity: 1;
+    line-height: 1;
+    color: var(--nb-text-2);
+    font-size: var(--nb-fs-1);
+    transition: background-color var(--nb-dur-fast) var(--nb-ease);
+}
+
+#story_taskbar .NB-taskbar .NB-taskbar-button:hover,
+.NB-feedbar .NB-taskbar .NB-taskbar-button:hover {
+    background-color: var(--nb-hover);
+}
+
+#story_taskbar .NB-taskbar .NB-taskbar-button.NB-active {
+    background-color: var(--nb-accent-soft);
+}
+
+/* Icon-only by default: the translated label stays in the DOM for tipsy
+   tooltips and screen readers, and the visible surface is the 16px glyph. */
+.NB-feedbar .NB-taskbar .NB-task-title {
+    display: none;
+}
+
+/* The five layout glyphs are near-identical bar icons, so this switch keeps its
+   translated label visible next to the icon (the text comes from the template,
+   no new msgids). View modes stay icon-only: their labels are longer and the
+   tipsy tooltip covers them. */
+.NB-toolbar-actions .NB-taskbar-layout .NB-task-title {
+    display: inline;
+    margin-inline-start: 5px;
+    font-size: var(--nb-fs-2);
+    font-weight: var(--nb-fw-medium);
+    line-height: 1;
+    white-space: nowrap;
+}
+
+/* The switch arrows belong to the legacy in-toolbar popover that this row
+   replaced; reader.js still toggles them, so keep the elements but never show
+   them. */
+.NB-feedbar .NB-taskbar .NB-task-view-switch-arrow {
+    display: none !important;
+}
+
+/* Labels need room: the layout buttons grow, the icon-only ones stay square. */
+#story_taskbar .NB-taskbar-layout .NB-taskbar-button {
+    width: auto;
+    min-width: 32px;
+    padding: 0 9px 0 7px;
+}
+
+.NB-feedbar .NB-taskbar .NB-task-image,
+.NB-toolbar-actions .NB-taskbar .NB-task-image {
+    flex: 0 0 16px;
+    width: 16px;
+    height: 16px;
+    margin: 0;
+    left: 0;
+    opacity: .75;
+    background-size: 16px;
+    background-position: center center;
+}
+
+#story_taskbar .NB-taskbar .NB-taskbar-button.NB-active .NB-task-image,
+.NB-feedbar .NB-taskbar .NB-taskbar-button:hover .NB-task-image {
+    opacity: 1;
+}
+
+/* --- Story search --- */
+
+/* The field rests as a 32px magnifier and opens on focus. A permanently open
+   200px field cost more width than the feed name could spare: at 1440 the title
+   block was left with 204px and the name was clipped to nothing. */
+.NB-toolbar-search {
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--nb-space-2);
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: var(--nb-radius-pill);
+    background-color: transparent;
+    cursor: text;
+    transition: width var(--nb-dur) var(--nb-ease),
+        background-color var(--nb-dur) var(--nb-ease),
+        border-color var(--nb-dur) var(--nb-ease);
+}
+
+.NB-toolbar-search:hover {
+    background-color: var(--nb-hover);
+}
+
+.NB-toolbar-search:focus-within {
+    justify-content: flex-start;
+    width: 220px;
+    padding: 0 var(--nb-space-2) 0 var(--nb-space-3);
+    background-color: var(--nb-surface-2);
+    border-color: var(--nb-accent);
+}
+
+.NB-toolbar-search-icon {
+    width: 14px;
+    height: 14px;
+    flex: 0 0 auto;
+    background: transparent url('/media/img/icons/nouns/search.svg') no-repeat center center;
+    background-size: 14px;
+    opacity: .5;
+}
+
+.NB-toolbar-search-input {
+    flex: 0 0 0;
+    width: 0;
+    min-width: 0;
+    height: 100%;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    outline: none;
+    opacity: 0;
+    font-family: var(--nb-font);
+    font-size: var(--nb-fs-2);
+    color: var(--nb-text);
+    transition: opacity var(--nb-dur) var(--nb-ease);
+}
+
+.NB-toolbar-search:focus-within .NB-toolbar-search-input {
+    flex: 1 1 auto;
+    width: auto;
+    opacity: 1;
+}
+
+/* A running search keeps the pill open so the term stays readable after the
+   field loses focus; otherwise the results have no visible label. */
+.NB-search-active .NB-toolbar-search {
+    justify-content: flex-start;
+    width: 220px;
+    padding: 0 var(--nb-space-2) 0 var(--nb-space-3);
+    background-color: var(--nb-surface-2);
+}
+
+.NB-search-active .NB-toolbar-search-input {
+    flex: 1 1 auto;
+    width: auto;
+    opacity: 1;
+}
+
+/* dark/*.css paints every input[type=search] with a #505050 plate, which
+   breaks the pill. Two selectors keep it flat in both themes. */
+
+.NB-feedbar .NB-toolbar-search .NB-toolbar-search-input {
+    border: 0;
+    border-radius: 0;
+    background-color: transparent;
+    box-shadow: none;
+}
+
+body.NB-dark .NB-feedbar .NB-toolbar-search .NB-toolbar-search-input {
+    border: 0;
+    background-color: transparent;
+}
+
+.NB-toolbar-search-input::placeholder {
+    color: var(--nb-meta);
+}
+
+.NB-toolbar-search-input::-webkit-search-cancel-button {
+    cursor: pointer;
+}
+
+/* --- Style pill --- */
+
+/* Right-hand order: search, refresh, view mode, layout, translate, style. */
+.NB-toolbar-actions .NB-toolbar-search { order: 1; }
+.NB-toolbar-actions .NB-toolbar-refresh { order: 2; }
+.NB-toolbar-actions .NB-taskbar-view { order: 3; }
+.NB-toolbar-actions .NB-taskbar-layout { order: 4; }
+.NB-toolbar-actions .NB-toolbar-translate { order: 5; }
+.NB-toolbar-actions .NB-taskbar-options-container { order: 6; }
+
+.NB-toolbar-actions .NB-taskbar-options-container {
+    flex: 0 0 auto;
+    margin: 0 0 0 var(--nb-space-2);
+}
+
+.NB-toolbar-actions .NB-taskbar-options {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 2px;
+    height: 28px;
+    margin: 0;
+    padding: 0 6px 0 10px;
+    border: 1px solid var(--nb-border);
+    border-radius: var(--nb-radius-pill);
+    background: transparent;
+    color: var(--nb-text-2);
+    font-size: var(--nb-fs-1);
+    font-weight: var(--nb-fw-medium);
+    text-transform: none;
+    letter-spacing: 0;
+    white-space: nowrap;
+}
+
+.NB-toolbar-actions .NB-taskbar-options:hover,
+.NB-toolbar-actions .NB-taskbar-options.NB-active {
+    background-color: var(--nb-hover);
+    color: var(--nb-text);
+}
+
+/* Both option pills used a 9px wide SVG chevron, which reads as a hairline at
+   1x, and the toolbar copy pointed up because the old taskbar sat at the bottom
+   of the window. Drawing the caret with two borders keeps it crisp in every
+   theme and lets it inherit the pill's colour. */
+.NB-feedbar .NB-feedbar-options .NB-icon,
+.NB-splash-modules .NB-module-river .NB-feedbar-options .NB-icon,
+#story_taskbar .NB-taskbar-options .NB-icon {
+    float: none;
+    display: inline-block;
+    flex: 0 0 auto;
+    width: 6px;
+    height: 6px;
+    margin: 0 1px 0 5px;
+    padding: 0;
+    background: none;
+    border-right: 1.5px solid currentColor;
+    border-bottom: 1.5px solid currentColor;
+    border-radius: 0;
+    transform: rotate(45deg);
+    vertical-align: 1px;
+    opacity: .55;
+}
+
+.NB-feedbar .NB-feedbar-options:hover .NB-icon,
+.NB-feedbar .NB-feedbar-options.NB-active .NB-icon,
+.NB-splash-modules .NB-module-river .NB-feedbar-options:hover .NB-icon,
+.NB-splash-modules .NB-module-river .NB-feedbar-options.NB-active .NB-icon,
+#story_taskbar .NB-taskbar-options:hover .NB-icon,
+#story_taskbar .NB-taskbar-options.NB-active .NB-icon {
+    opacity: .8;
+}
+
+/* The dashboard module pill has the same caret-first markup as the reader one. */
+.NB-splash-modules .NB-module-river .NB-feedbar-options {
+    display: inline-flex;
+    align-items: center;
+    float: none;
+}
+
+.NB-splash-modules .NB-module-river .NB-feedbar-options .NB-icon {
+    order: 2;
+}
+
+/* --- Fetch status (progress bar, feed errors) --- */
+
+.NB-toolbar-actions .NB-taskbar-info,
+.NB-toolbar-actions .NB-river-progress,
+.NB-toolbar-actions .NB-feed-error {
+    position: static;
+    flex: 0 0 auto;
+}
+
+/* --- Title block --- */
+
+.NB-feedbar .NB-story-titles-header {
+    flex: 1 1 auto;
+    /* The title block carries the folder name, the read filter and the
+       mark-as-read check, so it may shrink but never to nothing. The controls
+       on the right give way instead (see section 13). */
+    min-width: 140px;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    font-size: var(--nb-fs-5);
+    font-weight: var(--nb-fw-semibold);
+    color: var(--nb-text);
+}
+
+.NB-sidebar-closed .NB-feedbar .NB-story-titles-header {
+    margin-left: 0;
+}
+
+/* The header renders a .feed / .folder wrapper; lay its children out as one
+   centred line with the favicon first and the actions pushed right. */
+.NB-feedbar .NB-story-titles-header > .feed,
+.NB-feedbar .NB-story-titles-header > .folder,
+.NB-feedbar .NB-story-titles-header > .NB-folder,
+.NB-feedbar .NB-story-titles-header > .folder_title {
+    display: flex;
+    align-items: center;
+    gap: var(--nb-space-2);
+    height: 100%;
+    padding: 0;
+    overflow: hidden;
+}
+
+/* The folder branch nests .folder_title inside .folder, so the one-line layout
+   has to be applied one level down as well, otherwise the name stacks under the
+   controls and the header overflows its own row. */
+.NB-feedbar .NB-story-titles-header .folder_title {
+    display: flex;
+    align-items: center;
+    gap: var(--nb-space-2);
+    width: 100%;
+    height: 100%;
+    padding: 0;
+    overflow: hidden;
+}
+
+.NB-feedbar .NB-story-titles-header .feed_favicon,
+.NB-feedbar .NB-story-titles-header .NB-folder-icon {
+    position: static;
+    float: none;
+    margin: 0;
+    order: 0;
+    width: 18px;
+    height: 18px;
+    flex: 0 0 auto;
+}
+
+/* core/02-feed-list.css anchors the folder favicon inside its 16px icon box, and that box
+   sits at the top of the window once the folder header moves into the toolbar,
+   so the icon floated a row above the folder name. Put it back in the flow. */
+.NB-feedbar .NB-story-titles-header .NB-folder .NB-folder-icon .feed_favicon,
+.NB-feedbar .NB-story-titles-header .NB-folder .NB-folder-icon img.feed_favicon {
+    position: static;
+    width: 18px;
+    height: 18px;
+}
+
+.NB-feedbar .NB-story-titles-header .feed_title,
+.NB-feedbar .NB-story-titles-header .folder_title_text {
+    order: 1;
+    flex: 1 1 auto;
+    /* The search pill expands in place; the name keeps an ellipsis stub instead
+       of collapsing to zero width. */
+    min-width: 80px;
+    height: auto;
+    margin: 0;
+    padding: 0;
+    display: block;
+    color: var(--nb-text);
+    font-size: var(--nb-fs-5);
+    font-weight: var(--nb-fw-semibold);
+    line-height: 20px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    text-shadow: none;
+    -webkit-line-clamp: 1;
+    -webkit-box-orient: horizontal;
+}
+
+.NB-feedbar .NB-story-titles-header .feed_counts {
+    order: 2;
+    flex: 0 0 auto;
+    margin: 0;
+    color: var(--nb-meta);
+    font-size: var(--nb-fs-2);
+    font-weight: var(--nb-fw-normal);
+}
+
+.NB-feedbar .NB-story-titles-header .NB-story-title-indicator {
+    order: 3;
+    flex: 0 0 auto;
+}
+
+.NB-feedbar .NB-story-titles-header .NB-feedbar-mark-feed-read-container {
+    order: 6;
+    flex: 0 0 auto;
+    margin: 0;
+}
+
+/* The mark-as-read cluster still draws 2011 pill buttons: a 26x14 rounded
+   gradient box around a check. Draw it as a plain icon button instead, and let
+   the time chips read as text so the row does not look like a control strip. */
+.NB-feedbar .NB-feedbar-mark-feed-read,
+.NB-feedbar .NB-feedbar-mark-feed-read-time,
+.NB-feedbar .NB-feedbar-mark-feed-read-expand {
+    float: none;
+    margin: 0;
+    background-color: transparent;
+    background-image: none;
+    border: 0;
+    border-radius: var(--nb-radius-sm);
+    color: var(--nb-meta);
+}
+
+.NB-feedbar .NB-feedbar-mark-feed-read:hover,
+.NB-feedbar .NB-feedbar-mark-feed-read-time:hover {
+    background-color: var(--nb-hover);
+    background-image: none;
+    color: var(--nb-text);
+}
+
+.NB-feedbar .NB-feedbar-mark-feed-read {
+    width: 26px;
+    height: 26px;
+}
+
+/* The folder template reuses the whole feedbar header inside the title block,
+   so its collapse chevron and folder icons have to be neutralised here. */
+.NB-feedbar .NB-story-titles-header .NB-feedlist-collapse-icon,
+.NB-feedbar .NB-story-titles-header .NB-feedbar-mark-feed-read-expand {
+    display: none !important;
+}
+
+/* Pinned to the right edge of the title block: the read-filter / order pill
+   used to drift with the length of the feed name, which read as a layout bug. */
+.NB-feedbar .NB-story-titles-header .NB-feedbar-options-container {
+    order: 5;
+    flex: 0 0 auto;
+    float: none;
+    margin: 0 0 0 auto;
+}
+
+.NB-feedbar .NB-story-titles-header .NB-feedlist-manage-icon,
+.NB-feedbar .NB-story-titles-header .NB-feed-exception-icon,
+.NB-feedbar .NB-story-titles-header .NB-feed-unfetched-icon {
+    order: 7;
+    flex: 0 0 auto;
+    position: static;
+    margin: 0;
+}
+
+.NB-feedbar .NB-story-titles-header .NB-feedbar-options {
+    /* The caret is the first child in the markup and the legacy pill floated it
+       to the right; a flex row keeps it after the label without the float. */
+    display: inline-flex;
+    align-items: center;
+    float: none;
+    margin: 0;
+    padding: 2px 6px 2px 10px;
+    line-height: 16px;
+}
+
+.NB-feedbar .NB-story-titles-header .NB-feedbar-options .NB-icon {
+    order: 2;
+}
+
+/* 8. Taskbar ------------------------------------------------------------- */
+/* The view-mode and layout switches are part of the toolbar now (section 7);
+   nothing is left pinned to the bottom of the window. */
+
+.NB-taskbar-container {
+    background-color: var(--nb-surface);
+    background-image: none;
+    border-top: 1px solid var(--nb-border);
+    text-shadow: none;
+    font-family: var(--nb-font);
+}
+
+.NB-toolbar-actions .NB-taskbar {
+    margin: 0;
+}
+
+/* 9. Story list --------------------------------------------------------- */
+/* One row per story: a quiet spine in the feed colour, the title on one line
+   where it fits, an optional two line preview and the age on the right. */
+
+.NB-story-title.NB-story-title-list {
+    padding: 0 132px 0 44px;
+    background-color: var(--nb-surface);
+    border: 0;
+    border-bottom: 1px solid var(--nb-border);
+    font-size: var(--nb-fs-4);
+    line-height: 1.45;
+    font-weight: var(--nb-fw-medium);
+    color: var(--nb-text);
+    transition: background-color var(--nb-dur-fast) var(--nb-ease);
+}
+
+.NB-story-title-list a.story_title {
+    padding: 13px 8px 13px 0;
+    color: inherit;
+}
+
+.NB-story-title-list .NB-storytitles-title {
+    color: inherit;
+    font-weight: inherit;
+}
+
+.NB-story-title-list:hover {
+    background-color: var(--nb-hover);
+}
+
+.NB-story-title-list.NB-selected,
+.NB-story-title-list.NB-selected:hover {
+    background-color: var(--nb-accent-soft);
+}
+
+.NB-story-title-list.read {
+    color: var(--nb-meta);
+}
+
+.NB-story-title-list.read a.story_title {
+    color: var(--nb-meta);
+    font-weight: var(--nb-fw-normal);
+}
+
+/* The feed spine: a rounded marker inset from the row edges, instead of the
+   legacy double band that ran the full height of the row. */
+.NB-story-title-list .NB-storytitles-feed-border-outer {
+    left: 6px;
+    top: 11px;
+    width: 3px;
+    height: calc(100% - 22px);
+    border-radius: 2px;
+    opacity: 0.6;
+}
+
+.NB-story-title-list .NB-storytitles-feed-border-inner {
+    display: none;
+}
+
+.NB-story-title-list.read .NB-storytitles-feed-border-outer {
+    opacity: 0.15;
+}
+
+/* The legacy list hangs the feed name in a fixed 118px box outside the row
+   (core/03-story-titles.css .NB-story-title .NB-story-feed left: -150px) for a
+   left gutter the modern shell does not have, so only the tail of the name
+   painted inside the row and overflow cut it to a sliver before the headline.
+   Read the name as a caption above the headline, the way the story pane
+   (.NB-feed-story-header-feed) and the extra narrow list already do. */
+.NB-view-river #story_titles.NB-layout-list .NB-story-title-list .NB-story-feed {
+    position: static;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    width: fit-content;
+    max-width: 100%;
+    height: auto;
+    margin: 0 0 3px;
+    transition: none;
+}
+
+.NB-view-river #story_titles.NB-layout-list .NB-story-title-list .NB-story-feed .feed_favicon {
+    position: static;
+    flex: 0 0 13px;
+    width: 13px;
+    height: 13px;
+    border-radius: 3px;
+}
+
+/* Custom feed icons are a 16px emoji or a mask coloured square, not a 13px
+   image, so give them their own box instead of squeezing the glyph. */
+.NB-view-river #story_titles.NB-layout-list .NB-story-title-list .NB-story-feed .feed_favicon.NB-feed-emoji,
+.NB-view-river #story_titles.NB-layout-list .NB-story-title-list .NB-story-feed .feed_favicon.NB-feed-icon-colored {
+    flex: 0 0 14px;
+    width: 14px;
+    height: 14px;
+    font-size: 12px;
+    border-radius: 0;
+}
+
+.NB-view-river #story_titles.NB-layout-list .NB-story-title-list .NB-story-feed .feed_title {
+    position: static;
+    flex: 0 1 auto;
+    min-width: 0;
+    width: auto;
+    height: auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    word-break: normal;
+    line-height: 1.35;
+    /* The caption carries the feed's own hue so a folder river shows its sources at a
+       glance. oklch holds the perceptual weight steady across hues, and this lightness
+       clears 4.5:1 against the row, the alternate row and the selected row. */
+    color: oklch(0.5 0.13 var(--nb-feed-hue, 220));
+    font-weight: var(--nb-fw-normal);
+}
+
+/* Same hue in the dark theme, raised until the name reads on the dark row. */
+body.NB-dark .NB-view-river #story_titles.NB-layout-list .NB-story-title-list .NB-story-feed .feed_title {
+    color: oklch(0.8 0.12 var(--nb-feed-hue, 220));
+}
+
+/* story_title_view.js: the age rides on the source line, right after the feed name, so
+   it sits next to the icon instead of floating at the far right of the row. The core
+   rule pins it with position: absolute and a 96px right-aligned box; here it rejoins
+   the normal flow of the caption. */
+.NB-view-river #story_titles.NB-layout-list .NB-story-title-list .NB-story-feed .story_date {
+    position: static;
+    width: auto;
+    top: auto;
+    right: auto;
+    margin: 0;
+    padding: 0;
+    text-align: left;
+    white-space: nowrap;
+}
+
+.NB-view-river #story_titles.NB-layout-list .NB-story-title-list .NB-story-feed .NB-middot {
+    flex: none;
+    margin: 0;
+    color: var(--nb-meta);
+    font-size: var(--nb-fs-2);
+    opacity: .7;
+}
+
+.NB-story-title-list .NB-storytitles-sentiment {
+    left: -34px;
+    top: 16px;
+}
+
+.NB-story-title-list .NB-storytitles-content-preview {
+    margin-top: 3px;
+    color: var(--nb-meta);
+    font-size: var(--nb-fs-3);
+    line-height: 1.5;
+    font-weight: var(--nb-fw-normal);
+}
+
+.NB-story-title-list .story_date {
+    top: 15px;
+    right: 18px;
+    width: 96px;
+    text-align: right;
+    color: var(--nb-meta);
+    font-size: var(--nb-fs-2);
+    font-variant-numeric: tabular-nums;
+}
+
+.NB-story-title-list.read .story_date {
+    color: var(--nb-meta);
+    opacity: 0.65;
+}
+
+.NB-story-title-list .NB-storytitles-story-image {
+    border-radius: var(--nb-radius-sm);
+}
+
+/* Split view keeps the legacy 166px rows: 40px of padding plus an unclamped
+   preview. Tighten it to the same rhythm as the list. */
+
+.NB-story-title-split {
+    padding: 0 14px 0 44px;
+    border-bottom: 1px solid var(--nb-border);
+    font-size: var(--nb-fs-4);
+}
+
+.NB-story-title-split a.story_title {
+    padding: 12px 4px 12px 0;
+}
+
+.NB-story-title-split .NB-storytitles-title {
+    display: -webkit-box;
+    overflow: hidden;
+    color: var(--nb-text);
+    font-size: var(--nb-fs-4);
+    font-weight: var(--nb-fw-semibold);
+    line-height: 1.4;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+}
+
+.NB-story-title-split .NB-storytitles-content-preview {
+    display: -webkit-box;
+    overflow: hidden;
+    margin-top: 4px;
+    color: var(--nb-meta);
+    font-size: var(--nb-fs-3);
+    font-weight: var(--nb-fw-normal);
+    line-height: 1.45;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+}
+
+.NB-story-title-split .NB-story-title-split-bottom {
+    margin-top: 6px;
+    color: var(--nb-meta);
+    font-size: var(--nb-fs-2);
+}
+
+.NB-story-title-split .NB-storytitles-feed-border-outer {
+    left: 6px;
+    top: 12px;
+    width: 3px;
+    height: calc(100% - 24px);
+    border-radius: 2px;
+    opacity: 0.6;
+}
+
+.NB-story-title-split .NB-storytitles-feed-border-inner {
+    display: none;
+}
+
+.NB-story-title-split.read .NB-storytitles-title {
+    color: var(--nb-meta);
+    font-weight: var(--nb-fw-normal);
+}
+
+/* 10. Story content ------------------------------------------------------ */
+/* The reading column: one measure for the header, the body and the footer, so
+   the title of an article lines up with its first paragraph. */
+
+.NB-feed-story .NB-feed-story-header-info {
+    padding: 18px 32px;
+    background-color: var(--nb-surface);
+    border-left: 0;
+}
+
+.NB-feed-story.read .NB-feed-story-header-info {
+    background-color: var(--nb-surface-2);
+}
+
+/* core/04-story-content.css paints the river ribbon above each story as a dark gradient bar
+   carrying the feed name in white 13px bold, and story_detail_view.js:561 generate_gradients()
+   then swaps the plate for the feed's own colour. Collapsing the ribbon to a 3px rule left that
+   white label overflowing the rule, so opening a story in a folder river drew a clipped smear
+   of glyph fragments along the divider. Keep the feed colour as the 3px strip, and let the
+   label read as a meta caption above the title, on the same 700px measure as the title and
+   the body. The inline gradient from generate_gradients() is sized down here rather than
+   removed, so the strip still tells the feeds apart at a glance. */
+
+.NB-feed-story-header-feed {
+    height: auto;
+    padding: 16px 32px 0;
+    position: static;
+    background-color: transparent;
+    background-repeat: no-repeat;
+    background-position: 0 0;
+    background-size: 100% 3px;
+}
+
+.NB-feed-story-header-feed .NB-feed-story-feed {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    max-width: var(--nb-content-max);
+    margin-inline: auto;
+    padding: 0;
+    color: var(--nb-meta);
+    font-size: var(--nb-fs-2);
+    line-height: 1.4;
+}
+
+/* core/04-story-content.css parks the favicon in the left gutter of the old bar and swaps it
+   for the feed menu caret on hover; inside a flex caption that swap would shove the label
+   sideways, so the favicon keeps its slot and sits inline instead. */
+
+.NB-feed-story-header-feed .NB-feed-story-feed .feed_favicon {
+    position: static;
+    flex: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
+}
+
+.NB-feed-story-header-feed:hover .NB-feed-story-feed .feed_favicon {
+    display: block;
+}
+
+.NB-feed-story-header-feed .NB-feed-story-feed .NB-feed-story-header-title {
+    font-weight: var(--nb-fw-medium);
+    color: var(--nb-meta);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* The caret keeps its gutter slot; core/04-story-content.css filters it white for the dark
+   plate, which made it vanish on the light caption. */
+
+.NB-feed-story-header-feed .NB-feed-story-feed .NB-feedlist-manage-icon {
+    filter: none;
+    left: -20px;
+    top: 0;
+}
+
+/* Narrow panes: core/04-story-content.css gives the ribbon a 28px right padding, which would
+   pull the caption off the measure the title and the body use. */
+
+.NB-narrow-content .NB-feed-story-header-feed {
+    padding-right: 32px;
+}
+
+.NB-feed-story-title-container,
+.NB-feed-story-date-line {
+    max-width: var(--nb-content-max);
+    margin-inline: auto;
+}
+
+/* core/04-story-content.css parks the body in a 28px/236px padding box so the old side
+   options had room, which pushes the text off centre. Equalise the padding and
+   let the positioning wrapper (the element that carries the 700px measure) do
+   the centring. */
+
+.NB-feed-story .NB-story-content-wrapper {
+    padding: 0 28px 42px;
+}
+
+.NB-feed-story .NB-story-content-positioning-wrapper {
+    max-width: var(--nb-content-max);
+    margin-inline: auto;
+}
+
+.NB-feed-story a.NB-feed-story-title {
+    color: var(--nb-text);
+    font-size: var(--nb-fs-7);
+    line-height: 1.32;
+    font-weight: var(--nb-fw-bold);
+    letter-spacing: -0.01em;
+}
+
+.NB-feed-story a.NB-feed-story-title:hover {
+    color: var(--nb-accent);
+}
+
+/* Wide code samples used to push the reading column sideways; keep them inside
+   the measure with their own scrollbar. */
+
+.NB-feed-story-content pre {
+    max-width: 100%;
+    overflow-x: auto;
+}
+
+.NB-feed-story-content,
+.NB-feed-story-content p,
+.NB-feed-story-content li {
+    overflow-wrap: break-word;
+}
+
+.NB-feed-story .NB-feed-story-date {
+    color: var(--nb-meta);
+    font-size: var(--nb-fs-2);
+}
+
+.NB-story-content-container {
+    padding: 4px 32px 12px;
+}
+
+.NB-feed-story-content {
+    color: var(--nb-text);
+    font-size: var(--nb-fs-5);
+    line-height: var(--nb-lh-relaxed);
+}
+
+.NB-feed-story-content p {
+    margin: 0 0 1em;
+}
+
+.NB-feed-story-content img {
+    max-width: 100%;
+    height: auto;
+    border-radius: var(--nb-radius-sm);
+}
+
+/* The viewer only opens for images large enough to be worth it; the cursor is
+   the only hint, and it stays out of the way for avatars and icons. */
+.NB-feed-story-content img.NB-viewable-image {
+    cursor: zoom-in;
+}
+
+.NB-feed-story-content .NB-inline-media {
+    display: block;
+    max-width: 100%;
+    height: auto;
+    margin: 4px 0 16px;
+    border-radius: var(--nb-radius-md);
+    background-color: #0B0D10;
+}
+
+.NB-feed-story-content video.NB-inline-media,
+.NB-feed-story-content video.NB-inline-video {
+    width: 100%;
+    max-height: 70vh;
+}
+
+/* 11. Magazine ----------------------------------------------------------- */
+/* The magazine rows are full width reading cards: a bigger title, a two line
+   preview and the age under the text. */
+
+.NB-story-title.NB-story-title-magazine {
+    padding: 0 96px 0 44px;
+    background-color: var(--nb-surface);
+    border: 0;
+    border-bottom: 1px solid var(--nb-border);
+}
+
+.NB-story-title-magazine a.story_title {
+    padding: 18px 8px 16px 0;
+    color: var(--nb-text);
+}
+
+.NB-story-title-magazine .NB-storytitles-title {
+    color: var(--nb-text);
+    font-size: var(--nb-fs-6);
+    line-height: 1.4;
+    font-weight: var(--nb-fw-semibold);
+    letter-spacing: -0.01em;
+}
+
+.NB-story-title-magazine.read .NB-storytitles-title,
+.NB-story-title-magazine.read a.story_title {
+    color: var(--nb-text-2);
+}
+
+.NB-story-title-magazine:hover {
+    background-color: var(--nb-hover);
+}
+
+.NB-story-title-magazine.NB-selected {
+    background-color: var(--nb-accent-soft);
+}
+
+.NB-story-title-magazine .NB-storytitles-content-preview {
+    margin-top: 6px;
+    color: var(--nb-text-2);
+    font-size: var(--nb-fs-4);
+    line-height: 1.6;
+}
+
+.NB-story-title-magazine .story_date {
+    position: static;
+    width: auto;
+    margin-top: 10px;
+    text-align: left;
+    color: var(--nb-meta);
+    font-size: var(--nb-fs-2);
+}
+
+.NB-story-title-magazine .NB-storytitles-feed-border-outer {
+    left: 6px;
+    top: 20px;
+    width: 3px;
+    height: calc(100% - 40px);
+    border-radius: 2px;
+    opacity: 0.6;
+}
+
+.NB-story-title-magazine .NB-storytitles-feed-border-inner {
+    display: none;
+}
+
+/* 12. Grid cards --------------------------------------------------------- */
+/* Cards keep their covers at a fixed height and grow with their text, so a row
+   of cover-less cards is as tall as the tallest card instead of a fixed 420px
+   box with dead space under the preview. */
+
+#story_titles.NB-layout-grid > .NB-story-titles {
+    align-items: stretch;
+    gap: 20px;
+    padding: 20px 24px 32px;
+}
+
+#story_titles.NB-layout-grid .NB-story-title-container {
+    height: 100%;
+}
+
+#story_titles.NB-layout-grid .NB-grid-card {
+    height: 100%;
+    min-height: 0;
+}
+
+#story_titles.NB-layout-grid .NB-grid-card-media {
+    flex: 0 0 190px;
+}
+
+/* 13. Responsive --------------------------------------------------------- */
+
+/* The title block keeps a readable width even when every control is on. */
+
+.NB-story-titles-header {
+    min-width: 140px;
+}
+
+/* Tablets: drop the view modes, and shrink mark-as-read to its check so the
+   feed title keeps a readable width. Phones keep the check until 380px, where
+   the toolbar has no room left for it. */
+@media (max-width: 1100px) {
+    .NB-story-titles-header .NB-feedbar-mark-feed-read-container {
+        display: flex;
+    }
+
+    .NB-story-titles-header .NB-feedbar-mark-feed-read-time {
+        display: none;
+    }
+
+    #story_taskbar .NB-taskbar-view {
+        display: none;
+    }
+
+    /* Five layout glyphs cost 168px, which is more than the title block can
+       spare once the docked sidebar takes 341px. Layout stays reachable in
+       Preferences and in the per-feed settings, so the toolbar gives it up
+       before it gives up the folder name or the read filter. */
+    .NB-feedbar .NB-taskbar-layout {
+        display: none;
+    }
+
+    /* The style pill keeps its 40px target but gives back the 12px margins
+       that were squeezing the title block. */
+    .NB-feedbar .NB-taskbar-options-container {
+        margin-inline: 4px;
+    }
+
+    /* Magazine rows reserve a 400px cover gutter. A portrait tablet is left
+       with 31px of text and a phone's row runs 58px past the viewport, so the
+       cover stacks above the text instead of sitting beside it. */
+    #story_titles .NB-story-title-magazine.NB-story-title {
+        padding-inline: 16px;
+        min-height: 0;
+    }
+
+    #story_titles .NB-story-title-magazine .NB-storytitles-story-image-container {
+        position: static;
+        inset-inline: auto;
+        width: auto;
+        height: 150px;
+        margin: 12px 0 0;
+    }
+
+    #story_titles .NB-story-title-magazine .NB-storytitles-story-image {
+        position: static;
+        width: 100%;
+        height: 100%;
+        border-radius: 8px;
+        background-size: cover;
+        background-position: center;
+    }
+
+    /* The dot sits 28px left of the row (core/03-story-titles.css:868-870),
+       which was the gutter beside the cover. With the cover stacked there is no
+       gutter left, and the dot hung half outside the pane. The card grid hides
+       it for the same reason (grid.css:391-395). */
+    #story_titles .NB-story-title-magazine .NB-storytitles-sentiment {
+        display: none;
+    }
+
+    /* The trainer is measured from its content and pinned at 920x1000, so on an
+       820px portrait tablet it hung 50px off each edge and on a 768px tall
+        landscape tablet it ran 300px past the bottom. Let it follow the viewport
+       the way the phone layout already does. */
+    #simplemodal-container.NB-classifier-container {
+        left: var(--nb-space-3) !important;
+        right: var(--nb-space-3) !important;
+        top: var(--nb-space-3) !important;
+        width: auto !important;
+        max-width: none !important;
+        height: auto !important;
+        max-height: calc(100vh - var(--nb-space-6)) !important;
+        margin: 0 !important;
+        box-sizing: border-box;
+    }
+
+    #simplemodal-container.NB-classifier-container .simplemodal-wrap {
+        overflow: auto !important;
+    }
+}
+
+/* Small tablets: the story arrows cost another 100px, and at 820px the title
+   block was left with 0px, so the folder name, the read filter and the
+   mark-as-read check all disappeared. The list and a tap already switch
+   stories, so the arrows are what goes next. */
+@media (max-width: 960px) {
+    .NB-feedbar .NB-taskbar-nav {
+        display: none;
+    }
+}
+
+/* Phones and small tablets: the rail moves to the bottom edge, the sidebar
+   becomes an overlay drawer and the toolbar drops the view modes. */
+@media (max-width: 768px) {
+    :root {
+        --nb-rail-w: 0px;
+        --nb-rail-h: 56px;
+        --nb-toolbar-h: 52px;
+    }
+
+    #NB-rail {
+        inset-block-start: auto;
+        inset-block-end: 0;
+        inset-inline: 0;
+        width: 100%;
+        height: 56px;
+        flex-direction: row;
+        align-items: center;
+        padding: 0 6px;
+        border-inline-end: 0;
+        border-block-start: 1px solid var(--nb-rail-border);
+        z-index: 80;
+    }
+
+    .NB-rail-logo {
+        display: none;
+    }
+
+    .NB-rail-items {
+        flex: 1 1 auto;
+        flex-direction: row;
+        justify-content: space-around;
+        gap: 0;
+    }
+
+    .NB-rail-footer {
+        flex-direction: row;
+        gap: 0;
+        padding: 0;
+        /* margin-top:auto parks the footer at the bottom of the column rail;
+           in the bottom bar it would drop the group 4px below the icons. */
+        margin-top: 0;
+    }
+
+    /* Four nav icons plus three footer controls have to share 320px phones,
+       so the icons flex down instead of pushing the footer past the edge. */
+    .NB-rail-item {
+        width: auto;
+        min-width: 0;
+        max-width: 44px;
+        height: 44px;
+        flex: 1 1 0;
+    }
+
+    .NB-rail-footer .NB-rail-item {
+        flex: 0 0 40px;
+    }
+
+    .NB-rail-avatar {
+        width: 30px;
+        height: 30px;
+        flex: 0 0 34px;
+        /* The column layout pushes the avatar down to separate it from the
+           gear; in the bottom bar that just drops it below the icon row. */
+        margin-top: 0;
+    }
+
+    .NB-layout {
+        inset-block-end: 56px;
+    }
+
+    /* The rail is an overlay at this width, so the scrolling panes need their
+       own tail of space or the last row sits underneath it. */
+    #story_titles,
+    #story_pane {
+        padding-bottom: 56px;
+    }
+
+    /* Counts live in the drawer at this width; on a 44px icon the badge covers
+       the glyph it belongs to. */
+    .NB-rail-badge {
+        display: none;
+    }
+
+    /* jLayout owns left/width/z-index on .left-pane as inline styles, so the
+       drawer has to claim the same physical properties with !important. The
+       pane stays closed in jLayout (see toolbar_view.js) so the content pane
+       already spans the full width. */
+    .left-pane {
+        position: fixed !important;
+        top: 0 !important;
+        bottom: 56px !important;
+        left: 0 !important;
+        height: auto !important;
+        width: min(86vw, 320px) !important;
+        z-index: 90 !important;
+        overflow: hidden;
+        transform: translateX(-104%);
+        transition: transform var(--nb-dur) var(--nb-ease);
+    }
+
+    [dir='rtl'] .left-pane {
+        left: auto !important;
+        right: 0 !important;
+    }
+
+    [dir='rtl'] .left-pane {
+        transform: translateX(104%);
+    }
+
+    body.NB-sidebar-open .left-pane {
+        transform: none;
+        box-shadow: 0 12px 40px rgba(16, 24, 40, .28);
+    }
+
+    body.NB-sidebar-open::after {
+        content: '';
+        position: fixed;
+        inset: 0;
+        z-index: 85;
+        background-color: rgba(16, 24, 40, .36);
+    }
+
+    .content-pane {
+        inset-inline-start: 0 !important;
+        width: 100% !important;
+    }
+
+    .NB-toolbar-sidebar-toggle {
+        display: flex;
+        order: -1;
+    }
+
+    /* The drawer toggle replaces the old expand/collapse chevron. */
+    .NB-story-titles-expand-sidebar {
+        display: none !important;
+    }
+
+    #NB-splash {
+        margin-inline-start: 0;
+    }
+
+    /* Legacy rules target the id, so the media query has to match it. */
+    #story_taskbar .NB-taskbar-view {
+        display: none;
+    }
+
+    .NB-feedbar {
+        padding-inline: 6px;
+    }
+}
+
+/* Phones: only the reading switches survive, and the rows tighten up. */
+@media (max-width: 620px) {
+    #story_taskbar .NB-taskbar-layout {
+        display: none;
+    }
+
+    /* On a phone the arrows cost more than they give: swiping and the list are
+       the navigation. The freed width belongs to the feed title. */
+    .NB-feedbar .NB-taskbar-nav {
+        display: none;
+    }
+
+    /* Eight controls and a folder name do not fit on 390px. The translate
+       toggle is the one that can wait: it is still in the toolbar on tablets
+       and desktops, and the story pane keeps the original text. */
+    #story_taskbar .NB-toolbar-translate {
+        display: none;
+    }
+
+    /* The name keeps an ellipsis stub; the read filter and the mark-as-read
+       check are what the row is for at this width. */
+    .NB-feedbar .NB-story-titles-header .feed_title,
+    .NB-feedbar .NB-story-titles-header .folder_title_text {
+        min-width: 40px;
+    }
+
+    /* The feed options popover is 372px wide and hangs off a pill that sits
+       near the left edge of a 390px screen, so it gives up the extra width
+       instead of running past the viewport. */
+    .NB-popover {
+        max-width: calc(100vw - 16px);
+    }
+
+    /* The four 4px gaps cost 16px that the mark-as-read check needs more than
+       the spacing does. */
+    .NB-feedbar .NB-story-titles-header > .feed,
+    .NB-feedbar .NB-story-titles-header > .folder,
+    .NB-feedbar .NB-story-titles-header > .NB-folder,
+    .NB-feedbar .NB-story-titles-header .folder_title {
+        gap: 2px;
+    }
+
+    /* The read-filter pill shares the title row, so it gets less chrome. */
+    .NB-feedbar .NB-story-titles-header .NB-feedbar-options {
+        padding: 2px 4px;
+        max-width: 96px;
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+    }
+
+    .NB-story-title.NB-story-title-list {
+        padding: 0 64px 0 38px;
+    }
+
+    /* core/03-story-titles.css:962-977 reserves a preview column on the right (242px) for
+       the desktop story pane. Phones never render that column, so without this
+       the row content box collapses to a few dozen pixels and long titles wrap
+       one short word per line. */
+
+    .NB-image-preview-small-right .NB-story-titles .NB-story-title.NB-has-image,
+    .NB-image-preview-large-right .NB-story-titles .NB-story-title.NB-has-image,
+    .NB-image-preview-small-left .NB-story-titles .NB-story-title,
+    .NB-image-preview-large-left .NB-story-titles .NB-story-title {
+        padding-inline: 38px 64px;
+    }
+
+    .NB-story-title-list a.story_title {
+        padding-block: 12px;
+    }
+
+    .NB-story-title-list .story_date {
+        top: 14px;
+        right: 12px;
+        width: auto;
+    }
+
+    .NB-story-title-list .NB-storytitles-sentiment {
+        left: -30px;
+    }
+
+    .NB-story-title.NB-story-title-magazine {
+        padding-inline: 38px 24px;
+    }
+
+    .NB-feed-story .NB-feed-story-header-info,
+    .NB-story-content-container {
+        padding-inline: 20px;
+    }
+
+    /* The statistics dialog floats a 250px feed chooser beside its title
+       (media/css/reader/modals.css:425-433), which on a phone leaves the title
+       a couple of characters per line. Stack the chooser above the title. */
+    .NB-modal-statistics .NB-modal-feed-chooser-container {
+        float: none;
+        width: auto;
+        margin: 0 0 10px;
+    }
+
+    .NB-modal-statistics .NB-modal-feed-chooser-container .NB-modal-feed-chooser {
+        width: 100%;
+        margin-bottom: 0;
+    }
+
+    /* Four update blocks side by side get 81px each, so "15 to 18.75 minutes"
+       wraps to three lines and the archive label runs into the column next to
+       it. Two per row reads better. (media/css/reader/core/13-modals.css:60-65) */
+    .NB-modal-statistics .NB-statistics-stat .NB-statistics-update {
+        flex: 1 1 40%;
+    }
+
+    .NB-modal-statistics .NB-statistics-update-explainer {
+        flex: 1 1 100%;
+        margin-inline: 8px;
+    }
+
+    /* The two canvas charts are a fixed 524px wide (media/css/reader/core/13-modals.css:112-140)
+       and the stat box clips whatever overflows. A percentage width makes the
+       chart measure the dialog instead: reader_statistics.js:331-334 and
+       :390-393 read $plot.width() before drawing, so the canvas stays crisp. */
+    .NB-modal-statistics .NB-statistics-stat .NB-statistics-history-count-chart,
+    .NB-modal-statistics .NB-statistics-stat .NB-statistics-history-days-chart {
+        width: 100%;
+        max-width: 524px;
+    }
+
+    /* The add-site popover keeps the "in" label and the folder picker on the
+       title line (media/js/newsblur/reader/reader_add_feed.js:63-71). At 390px
+       the label is left a 16px column and stacks one character per line, so the
+       picker moves to its own row. */
+    .NB-add-header {
+        flex-wrap: wrap;
+        row-gap: 6px;
+    }
+
+    .NB-add-folder-label {
+        flex: 0 0 auto;
+        white-space: nowrap;
+    }
+
+    /* The site settings dialog keeps its desktop shape: a 250px feed chooser
+       floated beside the title, a 90px label beside every pill row, and 400px
+       text inputs indented 104px (media/css/reader/modals.css:425-433,
+       media/css/reader/core/13-modals.css:996-999). On a phone that leaves the
+       title a few characters, runs the pills off the right edge and makes the
+       inputs wider than the dialog. Stack all of it. */
+    .NB-modal-exception .NB-modal-feed-chooser-container {
+        float: none;
+        width: auto;
+        margin: 0 0 8px;
+    }
+
+    .NB-modal-exception .NB-modal-feed-chooser-container .NB-modal-feed-chooser {
+        width: 100%;
+    }
+
+    .NB-modal-exception.NB-modal-feed-settings .NB-modal-subtitle,
+    .NB-modal-exception.NB-modal-folder-settings .NB-modal-subtitle {
+        float: none;
+    }
+
+    .NB-modal-exception .NB-view-setting-row {
+        flex-wrap: wrap;
+        row-gap: 6px;
+    }
+
+    .NB-modal-exception .NB-view-setting-label {
+        flex: 1 1 100%;
+        min-width: 0;
+    }
+
+    .NB-modal-exception .NB-exception-option-view .segmented-control {
+        flex: 1 1 100%;
+        min-width: 0;
+        flex-wrap: wrap;
+    }
+
+    /* Four and five pills share the dialog width; the glyphs leave no room for
+       the words at 11px, so the words carry the row on their own. */
+    .NB-modal-exception .NB-exception-option-view .segmented-control li {
+        flex: 1 1 auto;
+        padding-inline: 6px;
+    }
+
+    .NB-modal-exception .NB-exception-option-view .segmented-control li img {
+        display: none;
+    }
+
+    .NB-modal-exception input[type=text] {
+        width: 100%;
+        max-width: 100%;
+        margin-left: 0;
+        box-sizing: border-box;
+    }
+
+    .NB-modal-exception .NB-exception-label {
+        position: static;
+        display: block;
+        margin-bottom: 4px;
+    }
+
+    /* The folder RSS rows hold a 100px label, a feed address and a copy button
+       on one line (media/css/reader/modals.css:728-772). The address box cannot
+       shrink below its intrinsic width, so the copy button was pushed out of
+       the dialog. The label takes its own row and the address gets the rest. */
+    .NB-modal-exception .NB-folder-rss-row {
+        flex-wrap: wrap;
+        row-gap: 6px;
+    }
+
+    .NB-modal-exception .NB-folder-rss-label {
+        flex: 1 1 100%;
+    }
+
+    .NB-modal-exception .NB-folder-rss-wrapper {
+        flex: 1 1 100%;
+        min-width: 0;
+    }
+}
+
+/* 14. Dark tweaks -------------------------------------------------------- */
+
+/* dark/*.css paints its own greys through selectors like `.NB-dark .left-pane`,
+   so every surface that reads a token needs the extra `body` in the compound
+   selector to outrank it. Adding body (0,2,1) beats .NB-dark .left-pane (0,2,0)
+   without reaching for !important. */
+
+body.NB-dark .left-pane,
+body.NB-dark .NB-feedlist,
+body.NB-dark .left-south {
+    background-color: var(--nb-surface);
+    border-color: var(--nb-border);
+    color: var(--nb-text);
+}
+
+body.NB-dark .left-north {
+    background-color: var(--nb-surface);
+    border-color: var(--nb-border);
+}
+
+body.NB-dark .NB-feeds-header {
+    background-color: var(--nb-surface-2);
+    border-color: var(--nb-border);
+}
+
+/* --- Feed tree --- */
+
+body.NB-dark .NB-feedlist .feed {
+    color: var(--nb-text-2);
+    /* dark/02-panes.css:312 paints every row #434543, which turns the tree into a
+       stack of raised boxes once the pane itself is a token surface. */
+    background-color: transparent;
+}
+
+body.NB-dark .NB-feedlist .feed:hover {
+    background-color: var(--nb-hover);
+}
+
+body.NB-dark .NB-feedlist .feed_title {
+    color: var(--nb-text-2);
+}
+
+body.NB-dark .NB-feedlist .feed.NB-selected,
+body.NB-dark .NB-feedlist .feed.selected,
+body.NB-dark .NB-feedlist .folder.NB-selected > .folder_title,
+body.NB-dark .NB-feedlist .folder_title:hover,
+body.NB-dark .NB-feeds-header.NB-selected {
+    background-color: var(--nb-accent-soft);
+    color: var(--nb-text);
+}
+
+body.NB-dark .NB-feedlist .feed.NB-selected .feed_title,
+body.NB-dark .NB-feedlist .feed.selected .feed_title {
+    color: var(--nb-text);
+}
+
+body.NB-dark .NB-feedlist .feed .NB-feedlist-unread-count,
+body.NB-dark .NB-feedlist .feed .NB-feedlist-negative-count,
+body.NB-dark .NB-feedlist .feed .NB-feedlist-positive-count {
+    color: var(--nb-meta);
+}
+
+/* --- Toolbar --- */
+
+body.NB-dark .NB-feedbar,
+body.NB-dark #story_taskbar,
+body.NB-dark .NB-taskbar-container {
+    background-color: var(--nb-surface);
+    border-color: var(--nb-border);
+}
+
+body.NB-dark .NB-toolbar-search {
+    background-color: var(--nb-surface-2);
+    border-color: var(--nb-border);
+}
+
+body.NB-dark .NB-toolbar-search input {
+    color: var(--nb-text);
+}
+
+body.NB-dark .NB-toolbar-search input::placeholder {
+    color: var(--nb-meta);
+}
+
+body.NB-dark .NB-feedbar-options,
+body.NB-dark .NB-taskbar-options {
+    background-color: var(--nb-surface-2);
+    border-color: var(--nb-border);
+    color: var(--nb-text-2);
+}
+
+body.NB-dark .NB-taskbar-button:hover {
+    background-color: var(--nb-hover);
+}
+
+body.NB-dark .NB-taskbar-button.NB-active {
+    background-color: var(--nb-accent-soft);
+}
+
+/* The legacy icon set is a fixed #95958E fill, and the light theme marks the
+   active button with hue-rotate(150deg) saturate(10). On dark that reads as a
+   muddy smear, so brighten the glyphs and let the accent-soft pill carry the
+   active state instead. */
+
+body.NB-dark .NB-taskbar .NB-task-image {
+    filter: none;
+    opacity: .55;
+}
+
+body.NB-dark .NB-taskbar .NB-taskbar-button:hover .NB-task-image {
+    opacity: .85;
+}
+
+body.NB-dark .NB-taskbar .NB-taskbar-button.NB-active .NB-task-image,
+body.NB-dark .NB-taskbar .NB-active .NB-task-image {
+    filter: none;
+    opacity: 1;
+}
+
+/* dark/02-panes.css gives the toolbar buttons 14px of side padding, which
+   squeezes the 16px glyph into a 4px sliver. The glyph already has a fixed
+   16px basis, so restore the light-theme padding rather than zeroing it:
+   the labelled layout buttons need their side padding in dark mode too. */
+
+body.NB-dark #story_taskbar .NB-taskbar .NB-taskbar-button {
+    padding: 0;
+}
+
+body.NB-dark #story_taskbar .NB-taskbar-layout .NB-taskbar-button {
+    padding: 0 9px 0 7px;
+}
+
+/* --- Story list --- */
+
+body.NB-dark .NB-story-title {
+    background-color: var(--nb-surface);
+    border-bottom-color: var(--nb-border);
+}
+
+body.NB-dark .NB-story-title:hover {
+    background-color: var(--nb-hover);
+}
+
+body.NB-dark .NB-story-title.NB-selected {
+    background-color: var(--nb-accent-soft);
+}
+
+body.NB-dark .NB-storytitles-title {
+    color: var(--nb-text);
+}
+
+body.NB-dark .NB-story-title.read .NB-storytitles-title,
+body.NB-dark .NB-story-title.read a.story_title {
+    color: var(--nb-meta);
+}
+
+body.NB-dark .story_date {
+    color: var(--nb-meta);
+}
+
+body.NB-dark .NB-storytitles-preview,
+body.NB-dark .NB-storytitles-preview * {
+    color: var(--nb-text-2);
+}
+
+/* --- Reading column --- */
+
+body.NB-dark .NB-feed-story .NB-feed-story-header-info {
+    background-color: var(--nb-surface);
+    border-color: var(--nb-border);
+    color: var(--nb-text);
+}
+
+body.NB-dark .NB-feed-story.read .NB-feed-story-header-info {
+    background-color: var(--nb-surface-2);
+}
+
+body.NB-dark .NB-feed-story a.NB-feed-story-title {
+    color: var(--nb-text);
+}
+
+body.NB-dark .NB-feed-story a.NB-feed-story-title:hover {
+    color: var(--nb-accent);
+}
+
+body.NB-dark .NB-feed-story-date-line {
+    color: var(--nb-meta);
+}
+
+body.NB-dark .NB-feed-stories {
+    background-color: var(--nb-surface);
+}
+
+body.NB-dark .NB-story-content-container {
+    background-color: transparent;
+}
+
+body.NB-dark .NB-feed-story-content {
+    color: var(--nb-text-2);
+}
+
+/* Feeds that wrap their whole post in <pre> (Telegram channels, plain text
+   posts) inherit the legacy highlight block, which is darker than the pane. */
+
+body.NB-dark .NB-feed-story-content pre,
+body.NB-dark .NB-feed-story-content code {
+    background-color: var(--nb-surface-2);
+    color: var(--nb-text-2);
+}
+
+/* 15. Dashboard, menus and modals ---------------------------------------- */
+/* The dashboard and the modal stack still ship the 2010 look: #eaece5 header
+   bars, Lucida headings and text shadows. Re-skin them with the same tokens so
+   the chrome around the reader does not fall back to the old palette. */
+
+#NB-splash {
+    background-color: var(--nb-bg);
+    padding: 24px 32px 56px;
+}
+
+.NB-splash-modules {
+    display: flex;
+    gap: 20px;
+    max-width: 1240px;
+    margin: 0 auto;
+    align-items: flex-start;
+}
+
+.NB-dashboard-rivers-left {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.NB-account-wide {
+    flex: 0 0 340px;
+}
+
+.NB-module {
+    background-color: var(--nb-surface);
+    border: 1px solid var(--nb-border);
+    border-radius: var(--nb-radius-lg);
+    overflow: hidden;
+}
+
+.NB-dashboard-rivers-left > div + div,
+.NB-module + .NB-module {
+    margin-top: 20px;
+}
+
+.NB-module-header,
+.NB-module h5 {
+    background: none;
+    background-color: var(--nb-surface-2);
+    border: 0;
+    border-bottom: 1px solid var(--nb-border);
+    border-radius: 0;
+    padding: 12px 16px;
+    margin: 0;
+    color: var(--nb-text);
+    font-family: var(--nb-font);
+    font-size: var(--nb-fs-4);
+    font-weight: var(--nb-fw-semibold);
+    text-align: start;
+    text-shadow: none;
+}
+
+.NB-module-river-title {
+    gap: 8px;
+}
+
+.NB-module-river-title-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.NB-view-river {
+    padding: 6px 0 10px;
+}
+
+/* --- Account menu --- */
+
+.NB-menu-manage-container {
+    width: 280px;
+    padding: 6px;
+    background-color: var(--nb-surface);
+    border: 1px solid var(--nb-border);
+    border-radius: var(--nb-radius-md);
+    box-shadow: var(--nb-shadow-lg);
+}
+
+.NB-menu-manage-container.NB-inverse {
+    background-color: var(--nb-surface);
+}
+
+.NB-menu-manage li {
+    border-radius: var(--nb-radius-sm);
+    color: var(--nb-text-2);
+    font-size: var(--nb-fs-3);
+}
+
+.NB-menu-manage li:hover {
+    background-color: var(--nb-hover);
+}
+
+/* --- Modals --- */
+
+.NB-modal {
+    color: var(--nb-text);
+}
+
+.NB-modal h2,
+.NB-modal .NB-modal-title {
+    color: var(--nb-text);
+    font-size: var(--nb-fs-7);
+    font-weight: var(--nb-fw-semibold);
+}
+
+.NB-modal h5 {
+    background: none;
+    border: 0;
+    padding: 10px 0 6px;
+    color: var(--nb-text-2);
+    font-family: var(--nb-font);
+    font-size: var(--nb-fs-4);
+    font-weight: var(--nb-fw-semibold);
+    text-align: start;
+    text-shadow: none;
+}
+
+.NB-modal .NB-modal-field input[type=text],
+.NB-modal .NB-modal-field input[type=email],
+.NB-modal .NB-modal-field input[type=password] {
+    background-color: var(--nb-surface);
+    border: 1px solid var(--nb-border-strong);
+    border-radius: var(--nb-radius-sm);
+    color: var(--nb-text);
+    box-shadow: none;
+}
+
+.NB-modal .NB-modal-field input[type=text]:focus,
+.NB-modal .NB-modal-field input[type=email]:focus,
+.NB-modal .NB-modal-field input[type=password]:focus {
+    border-color: var(--nb-accent);
+    box-shadow: 0 0 0 3px var(--nb-accent-soft);
+}
+
+
+
+/* Tabs, preference rows, form controls and submit buttons. modals.css paints
+   the rows #F7F7F5 (modals.css:435-475 for the tabs, core/14-static-pages.css:448-477 for
+   the rows) and the buttons with gradients; these replace both. */
+
+.NB-modal .NB-modal-tabs {
+    display: flex;
+    gap: 2px;
+    padding: 2px;
+    /* modals.css floats the strip right, which makes it shrink-to-fit and
+       spill out of the dialog once the tab labels are wide. */
+    float: none;
+    width: auto;
+    max-width: 100%;
+    margin-right: 0;
+    box-sizing: border-box;
+    background-color: var(--nb-surface-2);
+    border-radius: var(--nb-radius-md);
+}
+
+.NB-modal .NB-modal-tab {
+    padding: 5px 12px;
+    border: 0;
+    border-radius: var(--nb-radius-sm);
+    background: none;
+    color: var(--nb-text-2);
+    font-family: var(--nb-font);
+    font-size: var(--nb-fs-3);
+    box-shadow: none;
+}
+
+.NB-modal .NB-modal-tab:hover {
+    background-color: var(--nb-hover);
+    color: var(--nb-text);
+}
+
+.NB-modal .NB-modal-tab.NB-active,
+.NB-modal .NB-modal-tab.NB-active:hover {
+    background-color: var(--nb-surface);
+    color: var(--nb-text);
+    box-shadow: var(--nb-shadow-sm);
+}
+
+.NB-modal-preferences .NB-preference {
+    margin: 0;
+    padding: 14px 4px;
+    background: none;
+    border-bottom: 1px solid var(--nb-border);
+    border-radius: 0;
+    overflow: visible;
+}
+
+.NB-modal-preferences .NB-preference .NB-preference-label {
+    padding-top: 6px;
+    color: var(--nb-text-2);
+    font-size: var(--nb-fs-3);
+    font-weight: var(--nb-fw-medium);
+    line-height: 1.5;
+}
+
+.NB-modal-preferences .NB-preference .NB-preference-options {
+    padding: 0;
+}
+
+.NB-modal-preferences .NB-preference .NB-preference-sublabel,
+.NB-modal-preferences .NB-preference .NB-preference-sublabel-link {
+    color: var(--nb-meta);
+    font-size: var(--nb-fs-2);
+}
+
+.NB-modal select {
+    height: 32px;
+    padding: 0 28px 0 10px;
+    background-color: var(--nb-surface);
+    border: 1px solid var(--nb-border-strong);
+    border-radius: var(--nb-radius-sm);
+    color: var(--nb-text);
+    font-family: var(--nb-font);
+    font-size: var(--nb-fs-3);
+    box-shadow: none;
+}
+
+.NB-modal select:focus {
+    border-color: var(--nb-accent);
+    outline: none;
+    box-shadow: 0 0 0 3px var(--nb-accent-soft);
+}
+
+.NB-modal input[type=range] {
+    accent-color: var(--nb-accent);
+}
+
+.NB-modal-preferences .NB-daysofunread-slider-container {
+    background: none;
+    padding: 0;
+}
+
+.NB-modal-preferences .NB-daysofunread-slider-value {
+    color: var(--nb-text-2);
+    font-size: var(--nb-fs-2);
+}
+
+.NB-modal .NB-modal-submit-button {
+    padding: 8px 14px;
+    border: 0;
+    border-radius: var(--nb-radius-pill);
+    background: var(--nb-surface-2);
+    color: var(--nb-text-2);
+    font-family: var(--nb-font);
+    font-size: var(--nb-fs-3);
+    font-weight: var(--nb-fw-medium);
+    box-shadow: none;
+}
+
+.NB-modal .NB-modal-submit-button:hover {
+    background: var(--nb-hover);
+    color: var(--nb-text);
+}
+
+.NB-modal .NB-modal-submit-green {
+    background: var(--nb-accent);
+    color: var(--nb-on-accent);
+    font-weight: var(--nb-fw-semibold);
+}
+
+.NB-modal .NB-modal-submit-green:hover {
+    background: var(--nb-accent-hover);
+    color: var(--nb-on-accent);
+}
+
+.NB-modal .NB-modal-submit-red {
+    background: #D92D20;
+    color: var(--nb-legacy-ffffff);
+}
+
+.NB-modal .NB-modal-submit-red:hover {
+    background: #B42318;
+    color: var(--nb-legacy-ffffff);
+}
+
+body.NB-dark .NB-modal-preferences .NB-preference,
+body.NB-dark .NB-preference {
+    background: none;
+    border-bottom-color: var(--nb-border);
+}
+
+body.NB-dark .NB-modal .NB-modal-tab.NB-active {
+    background-color: var(--nb-accent-soft);
+    color: var(--nb-text);
+}
+
+body.NB-dark .NB-modal select {
+    background-color: var(--nb-surface-2);
+    border-color: var(--nb-border-strong);
+    color: var(--nb-text);
+}
+
+body.NB-dark .NB-modal-preferences .NB-daysofunread-slider-container {
+    background: none;
+}
+
+/* The modal card itself is painted #2F3840 in dark (dark/*.css) instead of
+   the app surface. */
+
+body #simplemodal-container,
+body.NB-dark #simplemodal-container {
+    background-color: var(--nb-surface);
+}
+
+/* The trainer was a 920px fixed panel; it now matches the 716px modal family,
+   so the 760px floor it used to need has to go. */
+.NB-modal.NB-modal-classifiers {
+    min-width: 0;
+}
+
+.NB-modal-preferences .NB-modal-submit-form {
+    margin-top: 0;
+    padding-top: 12px;
+    border-top: 1px solid var(--nb-border);
+}
+
+/* The preferences footer was a transparent strip, so the last row of a
+   scrolling tab showed through under the button. Paint it as a footer bar and
+   let the tab shrink above it instead of pushing content past the edge. */
+.NB-modal-preferences .NB-preferences-form {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+/* Tabs scroll inside a fixed height so every tab keeps the same modal size.
+   A 24px bottom pad keeps the last row clear of the fade, and the fade stops
+   the scroll edge from slicing a line of text in half above the footer. */
+.NB-modal-preferences .NB-preferences-form > .NB-tab {
+    box-sizing: border-box;
+    flex: 1 1 auto;
+    min-height: 0;
+    padding-bottom: 24px;
+    -webkit-mask-image: linear-gradient(to bottom, var(--nb-legacy-000) calc(100% - 22px), rgba(0, 0, 0, 0) 100%);
+    mask-image: linear-gradient(to bottom, var(--nb-legacy-000) calc(100% - 22px), rgba(0, 0, 0, 0) 100%);
+}
+
+.NB-modal-preferences .NB-preferences-form > .NB-modal-submit {
+    flex: 0 0 auto;
+    padding: 10px 4px 0;
+    background-color: var(--nb-surface);
+    border-top: 1px solid var(--nb-border);
+}
+
+.NB-modal-preferences .segmented-control {
+    display: flex;
+    gap: 2px;
+    padding: 2px;
+    background-color: var(--nb-surface-2);
+    border-radius: var(--nb-radius-md);
+}
+
+.NB-modal-preferences .segmented-control li {
+    flex: 1 1 0;
+    padding: 4px 10px;
+    border-radius: var(--nb-radius-sm);
+    color: var(--nb-text-2);
+    font-size: var(--nb-fs-2);
+    text-align: center;
+    white-space: nowrap;
+}
+
+.NB-modal-preferences .segmented-control li.NB-active {
+    background-color: var(--nb-surface);
+    color: var(--nb-text);
+    box-shadow: var(--nb-shadow-sm);
+}
+
+.NB-modal .NB-modal-submit-button.NB-disabled {
+    opacity: 0.55;
+    cursor: default;
+}
+
+body.NB-dark .NB-modal-preferences .NB-preference-daysofunread .NB-daysofunread-slider-container {
+    background: none;
+}
+
+body.NB-dark .NB-modal-preferences .segmented-control li.NB-active {
+    background-color: var(--nb-accent-soft);
+}
+
+
+
+/* 16. Sidebar footer ----------------------------------------------------- */
+/* The intelligence filter (All / Unread / Focus / Saved) plus the add and
+   manage buttons. core/*.css floats these; flex keeps them on one line at any
+   sidebar width. */
+
+.left-south .NB-taskbar-container {
+    background-color: var(--nb-surface);
+    border-top: 1px solid var(--nb-border);
+}
+
+.left-south .NB-feed-taskbar {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    height: 100%;
+    padding: 0 8px;
+    overflow: visible;
+}
+
+.left-south .NB-task-button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border-radius: var(--nb-radius-sm);
+    float: none;
+    opacity: 1;
+}
+
+.left-south .NB-task-button:hover {
+    background-color: var(--nb-hover);
+}
+
+/* modern.css: the sidebar logout button (templates/reader/feeds_skeleton.xhtml) draws its
+   glyph with currentColor, so it follows the taskbar's muted text and brightens on hover. */
+/* modern.css: the logout control is a real button so Enter and Space work without a
+   second keyboard handler; strip the browser chrome and keep the taskbar look. */
+.left-south button.NB-task-logout {
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    appearance: none;
+}
+
+.left-south .NB-task-logout .NB-task-image {
+    color: var(--nb-text-2);
+    transition: color 120ms ease;
+}
+
+.left-south .NB-task-logout:hover .NB-task-image {
+    color: var(--nb-text);
+}
+
+.left-south .NB-task-add,
+.left-south .NB-task-manage {
+    display: inline-flex;
+}
+
+.left-south .NB-intelligence-slider {
+    display: flex;
+    flex: 1 1 auto;
+    justify-content: flex-end;
+    margin-inline-start: auto;
+    min-width: 0;
+}
+
+.left-south .NB-intelligence-slider .segmented-control {
+    display: flex;
+    flex: 0 1 auto;
+    float: none;
+    width: auto;
+    max-width: 100%;
+    margin: 0;
+    padding: 2px;
+    background-color: var(--nb-surface-2);
+    border-radius: var(--nb-radius-pill);
+}
+
+.left-south .NB-intelligence-slider .NB-intelligence-slider-control {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: center;
+    height: auto;
+    min-width: 0;
+    padding: 3px 6px;
+    border-radius: var(--nb-radius-pill);
+    color: var(--nb-text-2);
+    font-size: var(--nb-fs-2);
+    line-height: 1.3;
+    white-space: nowrap;
+}
+
+.left-south .NB-intelligence-slider .NB-intelligence-slider-control.NB-active {
+    background-color: var(--nb-surface);
+    box-shadow: var(--nb-shadow-sm);
+    color: var(--nb-text);
+}
+
+/* core/09-manage.css:340-350 hides the Focus and Saved labels as soon as the pane is
+   narrow, leaving three anonymous colored dots. Keep every label readable. */
+
+.NB-body-main .left-south .NB-intelligence-slider .NB-intelligence-slider-control .NB-intelligence-label {
+    display: inline;
+    margin: 0;
+    padding: 0;
+    float: none;
+}
+
+.left-south .NB-intelligence-slider .NB-intelligence-slider-control img {
+    display: none;
+}
+
+/* ---------------------------------------------------------------------------
+ * 17. Popovers
+ * The taskbar "Style" popover and the feed options popover hang off the
+ * single-row toolbar now, so they share one surface treatment instead of the
+ * legacy white card (core/15-popovers.css:2023) and the dark #303739 card
+ * (dark/01-base.css:419).
+ * ------------------------------------------------------------------------ */
+
+.NB-popover {
+    background-color: var(--nb-surface);
+    border: 1px solid var(--nb-border);
+    border-radius: var(--nb-radius-lg);
+    box-shadow: var(--nb-shadow-lg);
+    padding: 2px;
+}
+
+body.NB-dark .NB-popover {
+    background-color: var(--nb-surface);
+    border: 1px solid var(--nb-border);
+}
+
+.NB-popover-section {
+    padding: 16px 14px;
+    border-bottom: 1px solid var(--nb-border);
+}
+
+.NB-popover-section:last-child {
+    border-bottom: none;
+}
+
+.NB-popover-section-title {
+    margin: 0 0 10px;
+    color: var(--nb-text-2);
+    font-family: var(--nb-font);
+    font-size: var(--nb-fs-3);
+    font-weight: var(--nb-fw-semibold);
+    letter-spacing: 0;
+}
+
+.NB-popover-section-global {
+    background-color: var(--nb-surface-2);
+    border: 1px solid var(--nb-border);
+    border-radius: var(--nb-radius-md);
+}
+
+.NB-popover-section-global .NB-popover-section {
+    border-bottom-color: var(--nb-border);
+}
+
+.NB-popover .segmented-control {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 2px;
+    padding: 2px;
+    background-color: var(--nb-surface-2);
+    border-radius: var(--nb-radius-md);
+}
+
+.NB-popover .segmented-control-vertical {
+    flex-direction: column;
+}
+
+.NB-popover .segmented-control li {
+    flex: 1 1 0;
+    min-width: 0;
+    padding: 4px 6px;
+    border-radius: var(--nb-radius-sm);
+    color: var(--nb-text-2);
+    font-family: var(--nb-font);
+    font-size: var(--nb-fs-2);
+    font-weight: var(--nb-fw-medium);
+    line-height: 1.4;
+    text-align: center;
+    white-space: nowrap;
+    text-shadow: none;
+    transition: background-color var(--nb-dur-fast) var(--nb-ease), color var(--nb-dur-fast) var(--nb-ease);
+}
+
+.NB-popover .segmented-control li:hover {
+    background-color: var(--nb-hover);
+    color: var(--nb-text);
+}
+
+.NB-popover .segmented-control li.NB-active {
+    background-color: var(--nb-surface);
+    color: var(--nb-text);
+    box-shadow: var(--nb-shadow-sm);
+}
+
+body.NB-dark .NB-popover .segmented-control li {
+    color: var(--nb-text-2);
+}
+
+body.NB-dark .NB-popover .segmented-control li.NB-active {
+    background-color: var(--nb-accent-soft);
+    color: var(--nb-text);
+}
+
+.NB-popover .NB-popover-section-title + .segmented-control {
+    margin-bottom: 4px;
+}
+
+
+body.NB-dark .NB-popover .segmented-control-vertical li {
+    background-color: transparent;
+}
+
+body.NB-dark .NB-popover .segmented-control-vertical li.NB-active {
+    background-color: var(--nb-accent-soft);
+}
+
+
+/* Counters read as plain numbers instead of the legacy traffic-light pills
+   (core/02-feed-list.css:924 and the .unread_count_* colour classes). */
+
+.NB-feedlist .feed .unread_count,
+.NB-feedlist .folder_title .unread_count,
+.NB-feeds-header .unread_count {
+    min-width: 0;
+    padding: 0 2px;
+    border-radius: 0;
+    background-color: transparent;
+    color: var(--nb-meta);
+    font-family: var(--nb-font);
+    font-size: var(--nb-fs-2);
+    font-weight: var(--nb-fw-medium);
+    font-variant-numeric: tabular-nums;
+    text-shadow: none;
+}
+
+.NB-feedlist .feed.NB-selected .unread_count,
+.NB-feedlist .feed.selected .unread_count {
+    color: var(--nb-accent);
+}
+
+/* The sticky folder header reads its own variable, which dark/02-panes.css:308
+   resets to #434543 on .NB-dark .NB-sidebar. */
+
+body.NB-dark .NB-sidebar {
+    --nb-sidebar-sticky-feedlist-background: var(--nb-surface);
+    --nb-sidebar-sticky-feedlist-selected-background: var(--nb-accent-soft);
+}
+
+/* ---------------------------------------------------------------------------
+ * 18. Dashboard cards
+ * The splash dashboard is a two column grid: the river modules on the left and
+ * the manage module on the right. Every module is a card with a 48px header,
+ * and the rivers render compact split rows instead of the reader story rows.
+ * Selectors carry .NB-splash-modules because modals.css:144 owns
+ * .NB-module-header with a beige 14px 12px header and core/11-menus.css:488 centres
+ * the river title, both at class-only specificity.
+ * ------------------------------------------------------------------------ */
+
+#NB-splash {
+    inset-inline-start: calc(var(--nb-rail-w) + var(--nb-feed-pane-w, 264px)) !important;
+    margin-inline-start: 0 !important;
+    padding-inline: 0 !important;
+}
+
+.NB-splash-modules {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 336px;
+    align-items: start;
+    gap: 20px;
+    max-width: 1360px;
+    margin: 0 auto;
+    padding: 24px;
+}
+
+.NB-modules-center,
+.NB-account-wide {
+    display: flex;
+    flex-direction: column;
+    flex: none;
+    gap: 20px;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+}
+
+/* The right column starts with an empty rivers container, which used to push
+   the manage card 20px below the first river card. */
+
+.NB-account-wide {
+    gap: 0;
+}
+
+.NB-account-wide > * + * {
+    margin-top: 20px;
+}
+
+.NB-account-wide > .NB-dashboard-rivers-right:empty {
+    display: none;
+}
+
+.NB-account-wide > .NB-dashboard-rivers-right:empty + * {
+    margin-top: 0;
+}
+
+.NB-dashboard-river,
+.NB-module-manage {
+    background-color: var(--nb-surface);
+    border: 1px solid var(--nb-border);
+    border-radius: var(--nb-radius-lg);
+    overflow: hidden;
+}
+
+/* Module header ----------------------------------------------------------- */
+
+.NB-splash-modules .NB-dashboard-river .NB-module-header,
+.NB-splash-modules .NB-account-wide .NB-module-content-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: 48px;
+    margin: 0;
+    padding: 0 10px 0 14px;
+    background: none;
+    background-color: var(--nb-surface);
+    border-bottom: 1px solid var(--nb-border);
+    border-radius: 0;
+    box-shadow: none;
+    color: var(--nb-text);
+    font-family: var(--nb-font);
+    font-size: var(--nb-fs-4);
+    font-weight: var(--nb-fw-semibold);
+    letter-spacing: 0;
+    line-height: 1.3;
+    text-align: start;
+    text-shadow: none;
+}
+
+.NB-splash-modules .NB-dashboard-river .NB-module-river-title {
+    display: flex;
+    flex: 1 1 auto;
+    order: 1;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 8px;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    float: none;
+    text-align: start;
+    color: var(--nb-text);
+    font-size: var(--nb-fs-4);
+    font-weight: var(--nb-fw-semibold);
+    cursor: pointer;
+}
+
+.NB-module-river-title-text {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.NB-module-river-favicon {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+}
+
+.NB-splash-modules .NB-dashboard-river .NB-module-river-favicon img {
+    display: block;
+    width: 16px;
+    height: 16px;
+    margin: 0;
+    border-radius: 3px;
+    transform: none;
+}
+
+.NB-splash-modules .NB-dashboard-river .NB-module-river-settings {
+    display: flex;
+    flex: 0 0 auto;
+    order: 2;
+    align-items: center;
+    gap: 4px;
+    float: none;
+    margin: 0;
+    padding: 0;
+}
+
+.NB-module-river-settings a {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    border: 1px solid var(--nb-border);
+    border-radius: var(--nb-radius-sm);
+    color: var(--nb-text-2);
+    font-size: var(--nb-fs-2);
+    text-decoration: none;
+}
+
+.NB-module-river-settings a:hover {
+    background-color: var(--nb-hover);
+    color: var(--nb-text);
+}
+
+/* The 1/2/3 column switch belonged to the old two-column river layout. The
+   cards are single-column now, so the control would only clip into a grey
+   square in the header. */
+
+.NB-splash-modules .NB-dashboard-column-control {
+    display: none !important;
+}
+
+/* River rows -------------------------------------------------------------- */
+
+.NB-splash-modules .NB-dashboard-river .NB-view-river {
+    margin: 0;
+    border-radius: 0;
+    box-shadow: none;
+}
+
+.NB-splash-modules .NB-dashboard-river .NB-module-item {
+    min-height: 0;
+    padding: 0;
+    overflow: visible;
+}
+
+.NB-dashboard-river .NB-story-titles {
+    margin: 0;
+    padding: 0;
+}
+
+/* core/03-story-titles.css:953-976 indents river rows to leave room for the reader's
+   preview column; the dashboard rows carry their own padding instead. */
+
+.NB-splash-modules .NB-dashboard-river .NB-view-river .NB-story-pane-west .NB-story-title,
+.NB-splash-modules .NB-dashboard-river .NB-view-river .NB-story-pane-south .NB-story-title,
+.NB-splash-modules .NB-dashboard-river .NB-view-river .NB-story-title.NB-has-image {
+    padding: 0 !important;
+}
+
+.NB-dashboard-river .NB-story-title {
+    position: relative;
+    display: block;
+    padding: 0;
+    background-color: transparent;
+    border: 0;
+    border-bottom: 1px solid var(--nb-border);
+    font-size: var(--nb-fs-4);
+}
+
+.NB-dashboard-river .NB-story-title:last-child {
+    border-bottom: 0;
+}
+
+.NB-dashboard-river .NB-story-title:hover {
+    background-color: var(--nb-hover);
+}
+
+.NB-dashboard-river .NB-story-title .story_title {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+        "feed thumb"
+        "title thumb"
+        "preview thumb"
+        "meta thumb";
+    column-gap: 16px;
+    row-gap: 2px;
+    padding: 12px 16px 12px 20px;
+    color: inherit;
+    text-decoration: none;
+}
+
+.NB-dashboard-river .NB-story-title .NB-story-feed {
+    display: block;
+    position: static;
+    grid-area: feed;
+    width: auto;
+    height: auto;
+    left: auto;
+    top: auto;
+    margin: 0;
+    color: var(--nb-meta);
+    font-size: var(--nb-fs-1, 11px);
+    line-height: 1.3;
+}
+
+.NB-dashboard-river .NB-story-title .NB-story-feed .feed_title {
+    display: inline;
+    position: static;
+    width: auto;
+    height: auto;
+    left: auto;
+    top: auto;
+    color: var(--nb-meta);
+    font-size: var(--nb-fs-2);
+    font-weight: var(--nb-fw-medium);
+}
+
+.NB-dashboard-river .NB-story-title .NB-story-feed .feed_favicon {
+    display: none;
+}
+
+.NB-dashboard-river .NB-story-title .NB-storytitles-title {
+    grid-area: title;
+    color: var(--nb-text);
+    font-size: var(--nb-fs-4);
+    font-weight: var(--nb-fw-semibold);
+    line-height: 1.35;
+}
+
+.NB-dashboard-river .NB-story-title.read .NB-storytitles-title {
+    color: var(--nb-text-2);
+    font-weight: var(--nb-fw-normal);
+}
+
+.NB-dashboard-river .NB-story-title .NB-storytitles-content-preview {
+    display: -webkit-box;
+    grid-area: preview;
+    margin: 0;
+    overflow: hidden;
+    color: var(--nb-meta);
+    font-size: var(--nb-fs-3);
+    line-height: 1.45;
+    -webkit-line-clamp: 1;
+    -webkit-box-orient: vertical;
+}
+
+.NB-dashboard-river .NB-story-title .NB-story-title-split-bottom {
+    display: flex;
+    grid-area: meta;
+    align-items: center;
+    gap: 6px;
+    margin: 0;
+    color: var(--nb-meta);
+    font-size: var(--nb-fs-1, 11px);
+    line-height: 1.3;
+}
+
+.NB-dashboard-river .NB-story-title .story_date {
+    position: static;
+    width: auto;
+    height: auto;
+    color: var(--nb-meta);
+    font-size: var(--nb-fs-2);
+    font-variant-numeric: tabular-nums;
+}
+
+.NB-dashboard-river .NB-storytitles-sentiment,
+.NB-dashboard-river .NB-story-manage-icon,
+.NB-dashboard-river .NB-storytitles-star {
+    display: none;
+}
+
+.NB-dashboard-river .NB-storytitles-story-image-container {
+    display: block;
+    grid-area: thumb;
+    align-self: start;
+    width: 56px;
+    height: 56px;
+    margin: 0;
+    padding: 0;
+    float: none;
+}
+
+.NB-dashboard-river .NB-storytitles-story-image {
+    display: block;
+    width: 56px;
+    height: 56px;
+    border-radius: var(--nb-radius-md);
+    object-fit: cover;
+}
+
+.NB-dashboard-river .NB-storytitles-feed-border-outer {
+    position: absolute;
+    inset-inline-start: 0;
+    top: 14px;
+    width: 3px;
+    height: calc(100% - 28px);
+    border-radius: 0 2px 2px 0;
+    opacity: 0.55;
+}
+
+.NB-dashboard-river .NB-storytitles-feed-border-inner {
+    display: none;
+}
+
+/* Manage module ----------------------------------------------------------- */
+
+.NB-splash-modules .NB-account-wide .NB-module-content-header {
+    justify-content: space-between;
+}
+
+.NB-splash-modules .NB-account-wide .NB-module-item {
+    min-height: 0;
+    padding: 6px 8px 10px;
+    overflow: visible;
+}
+
+.NB-splash-modules .NB-menu-manage {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.NB-splash-modules .NB-menu-manage li.NB-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: 40px;
+    padding: 0 8px;
+    border: 0;
+    border-radius: var(--nb-radius-sm);
+    background-color: transparent;
+    color: var(--nb-text);
+    font-size: var(--nb-fs-3);
+}
+
+.NB-splash-modules .NB-menu-manage li.NB-menu-item:hover {
+    background-color: var(--nb-hover);
+}
+
+.NB-splash-modules .NB-menu-manage .NB-menu-manage-image {
+    flex: 0 0 auto;
+    width: 16px;
+    height: 16px;
+    margin: 0;
+    opacity: 0.55;
+    filter: grayscale(1);
+}
+
+.NB-splash-modules .NB-menu-manage li.NB-menu-item > a {
+    color: inherit;
+    text-decoration: none;
+}
+
+.NB-splash-modules .NB-menu-manage .segmented-control {
+    display: flex;
+    flex: 0 1 auto;
+    align-items: center;
+    max-height: 34px;
+    gap: 2px;
+    min-width: 0;
+    margin: 0 0 0 auto;
+    padding: 2px;
+    overflow: hidden;
+    background-color: var(--nb-surface-2);
+    border-radius: var(--nb-radius-md);
+}
+
+.NB-splash-modules .NB-menu-manage .segmented-control li {
+    box-sizing: border-box;
+    display: flex;
+    flex: 1 1 0;
+    align-items: center;
+    justify-content: center;
+    min-width: 0;
+    height: 30px;
+    max-height: 30px;
+    padding: 0 6px;
+    border-radius: var(--nb-radius-sm);
+    color: var(--nb-text-2);
+    font-size: var(--nb-fs-2);
+    line-height: 1;
+    text-align: center;
+    white-space: nowrap;
+}
+
+.NB-splash-modules .NB-menu-manage .segmented-control li.NB-active {
+    background-color: var(--nb-surface);
+    box-shadow: var(--nb-shadow-sm);
+    color: var(--nb-text);
+}
+
+.NB-splash-modules .NB-menu-manage .NB-menu-item .NB-menu-manage-logout {
+    display: inline-flex;
+    flex: 0 0 auto;
+    order: 2;
+    align-items: center;
+    height: 26px;
+    margin: 0 0 0 auto;
+    padding: 0 12px;
+    float: none;
+    border: 1px solid var(--nb-border);
+    border-radius: var(--nb-radius-pill);
+    /* The legacy submit classes paint a beige gradient; the pill has to be flat. */
+    background-color: transparent;
+    background-image: none;
+    box-shadow: none;
+    color: var(--nb-text-2);
+    font-size: var(--nb-fs-2);
+    text-decoration: none;
+}
+
+.NB-splash-modules .NB-menu-manage .NB-menu-item .NB-menu-manage-logout:hover {
+    background-color: var(--nb-hover);
+    color: var(--nb-text);
+}
+
+/* Legacy wrapper around the three appearance rows: it paints a beige plate with
+   its own border, which reads as a second card nested inside the manage card. */
+.NB-splash-modules .NB-module-manage .NB-module-stats-counts,
+body.NB-dark .NB-splash-modules .NB-module-manage .NB-module-stats-counts {
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background-color: transparent;
+}
+
+/* Three font names share a ~200px track. At 12px the longest name is wider
+   than its equal share, so the labels ran into each other; 11px keeps every
+   name inside its own cell, with an ellipsis if a translation runs longer. */
+.NB-splash-modules .NB-menu-manage .NB-menu-manage-font .segmented-control li {
+    display: block;
+    flex: 0 1 auto;
+    overflow: hidden;
+    padding: 0 8px;
+    font-size: var(--nb-fs-1);
+    line-height: 30px;
+    text-overflow: ellipsis;
+}
+
+/* Group the appearance controls away from the navigation rows below them. */
+.NB-splash-modules .NB-menu-manage .NB-menu-manage-font {
+    margin-bottom: 6px;
+    box-shadow: inset 0 -1px 0 var(--nb-border);
+}
+
+/* Dark -------------------------------------------------------------------- */
+
+body.NB-dark .NB-dashboard-river,
+body.NB-dark .NB-module-manage,
+body.NB-dark .NB-splash-modules .NB-dashboard-river .NB-module-header,
+body.NB-dark .NB-splash-modules .NB-account-wide .NB-module-content-header {
+    background-color: var(--nb-surface);
+    border-color: var(--nb-border);
+}
+
+body.NB-dark .NB-menu-manage li.NB-menu-item:hover,
+body.NB-dark .NB-dashboard-river .NB-story-title:hover {
+    background-color: var(--nb-hover);
+}
+
+body.NB-dark .NB-splash-modules .NB-menu-manage .segmented-control li.NB-active {
+    background-color: var(--nb-accent-soft);
+    color: var(--nb-text);
+}
+
+body.NB-dark .NB-splash-modules .NB-menu-manage .NB-menu-manage-image {
+    filter: invert(1) opacity(0.6);
+}
+
+/* Responsive -------------------------------------------------------------- */
+
+@media (max-width: 1100px) {
+    .NB-splash-modules {
+        grid-template-columns: minmax(0, 1fr);
+        padding: 16px;
+    }
+}
+
+/* The splash carried its own settings bar (.NB-splash-info, core/07-panes.css:564).
+   The rail owns those actions now, so the bar only steals vertical space. */
+
+.NB-splash-info {
+    display: none;
+}
+
+@media (max-width: 768px) {
+    #NB-splash {
+        inset-inline-start: 0 !important;
+        padding-inline: 0 !important;
+    }
+
+    /* The sidebar is a drawer below 768px, so its drag handle would float in
+       the middle of the content as a stray 1px rule. */
+
+    .NB-pane-resizer {
+        display: none !important;
+    }
+
+    .NB-splash-modules {
+        padding: 12px;
+        gap: 14px;
+    }
+
+    .NB-dashboard-river .NB-story-title .story_title {
+        padding: 12px 12px 12px 16px;
+    }
+
+    /* A phone stacks four horizontal paddings (pane gutter 24 + container 20 +
+       wrapper 28 + a legacy padding-right) and leaves a 246px measure on a
+       390px screen. Only the pane owns the margin here, so the two boxes that
+       touch the screen edge carry the gutter and the nested wrapper gives
+       its own up. core/*.css sets these per side with higher specificity than
+       a plain class, hence the !important. */
+
+    .NB-feed-story .NB-story-content-container {
+        padding-inline: 16px !important;
+    }
+
+    .NB-feed-story .NB-story-content-wrapper {
+        padding-inline: 0 !important;
+        padding-bottom: 32px;
+    }
+
+    .NB-feed-story .NB-feed-story-header-info {
+        padding-inline: 16px !important;
+    }
+
+    /* The dot hangs 22px left of the title (core/04-story-content.css:481-487)
+       to sit in the desktop gutter. With a 16px pane gutter it lands at -6 and
+       gets cut by the screen edge, so park it in that gutter instead. */
+    .NB-feed-story .NB-feed-story-title-container .NB-feed-story-sentiment {
+        left: -16px;
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ * 19. Sidebar section headers
+ * core/06-headers.css paints .NB-feeds-header with a fixed beige that ignores the theme,
+ * so the All / Saved headers read as leftover chrome next to the white tree.
+ * ------------------------------------------------------------------------ */
+
+/* These rows are position:sticky at the top of the scrolling feed tree, so
+   their plate has to be opaque. A transparent background let feed titles show
+   through the header while scrolling and the two texts collided. */
+.NB-feeds-header,
+.NB-feeds-header-container {
+    background-color: var(--nb-surface);
+    border: 0;
+    border-radius: 0;
+    box-shadow: inset 0 -1px 0 var(--nb-border);
+    color: var(--nb-text-2);
+    font-weight: var(--nb-fw-medium);
+}
+
+.NB-feeds-header:hover,
+.NB-feeds-header-container:hover {
+    background-color: var(--nb-hover);
+}
+
+.NB-feeds-header.NB-selected,
+.NB-feeds-header-container.NB-selected {
+    background-color: var(--nb-accent-soft);
+    color: var(--nb-accent);
+}
+
+body.NB-dark .NB-feeds-header,
+body.NB-dark .NB-feeds-header-container {
+    background-color: var(--nb-surface);
+    box-shadow: inset 0 -1px 0 var(--nb-border);
+    color: var(--nb-text-2);
+}
+
+/* ==========================================================================
+   20. Motion budget
+   Overlay fades run over a full-viewport translucent layer, so each frame
+   repaints everything behind it. A Chrome trace of the add-feed popover showed
+   the 400ms fade costing 105 raster tasks and roughly doubling main-thread work
+   while the overlay was on screen, which reads as a stalled page on slower
+   machines. Shorter fades land in the same place without the stall.
+   ========================================================================== */
+
+.NB-overlay {
+    transition: opacity 140ms ease;
+}
+
+.NB-popover.fade {
+    transition: opacity 120ms ease-out;
+}
+
+/* ---------------------------------------------------------------------------
+ * 21. Folder collapse affordance
+ * The legacy control is a 24px "+" PNG pinned to the far right of the row and
+ * only painted while the row is hovered, so folding a folder was effectively
+ * undiscoverable: the row looked like it had no control at all. This replaces
+ * it with an always-visible chevron that rotates when the folder is folded.
+ * ------------------------------------------------------------------------ */
+
+.NB-feedlist .folder .folder_title .NB-feedlist-collapse-icon,
+.NB-feeds-header .NB-feedlist-collapse-icon {
+    display: block;
+    top: 50%;
+    inset-inline-end: 6px;
+    width: 20px;
+    height: 20px;
+    margin-top: -10px;
+    border-radius: var(--nb-radius-xs);
+    background-image: none;
+    opacity: .45;
+    cursor: pointer;
+    transition: opacity var(--nb-dur-fast) var(--nb-ease),
+        background-color var(--nb-dur-fast) var(--nb-ease);
+}
+
+.NB-feedlist .folder .folder_title:hover .NB-feedlist-collapse-icon,
+.NB-feeds-header:hover .NB-feedlist-collapse-icon {
+    display: block;
+    opacity: .85;
+}
+
+.NB-feedlist .folder .folder_title .NB-feedlist-collapse-icon:hover,
+.NB-feeds-header .NB-feedlist-collapse-icon:hover {
+    background-color: var(--nb-hover);
+    opacity: 1;
+}
+
+/* Chevron drawn from two borders so it inherits the theme colour. */
+.NB-feedlist .folder .folder_title .NB-feedlist-collapse-icon::before,
+.NB-feeds-header .NB-feedlist-collapse-icon::before {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 5px;
+    height: 5px;
+    border-right: 1.5px solid var(--nb-text-2);
+    border-bottom: 1.5px solid var(--nb-text-2);
+    transform: translate(-50%, -65%) rotate(45deg);
+    transition: transform var(--nb-dur-fast) var(--nb-ease);
+}
+
+.NB-feedlist .folder.NB-folder-collapsed > .folder_title .NB-feedlist-collapse-icon::before,
+.NB-feeds-header.NB-folder-collapsed .NB-feedlist-collapse-icon::before {
+    transform: translate(-65%, -50%) rotate(-45deg);
+}
+
+/* Keep the unread count clear of the chevron. */
+.NB-feedlist .folder .folder_title .feed_counts,
+.NB-feeds-header .feed_counts {
+    margin-inline-end: 22px;
+}
+
+/* core/02-feed-list.css:690 leaves the folder floater as a zero-height block, so its
+   floated counts sit at the top of the row and stop well short of the numbers
+   on feed rows. Anchor it to the row and centre it on the folder name. */
+.NB-feedlist .folder > .folder_title {
+    position: relative;
+}
+
+.NB-feedlist .folder > .folder_title.NB-sticky-sidebar-folder {
+    position: sticky;
+}
+
+.NB-feedlist .folder > .folder_title .feed_counts_floater {
+    position: absolute;
+    inset-block: 0;
+    inset-inline: 0;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    padding-inline-end: 34px;
+    margin: 0;
+    line-height: 1;
+    pointer-events: none;
+}
+
+.NB-feedlist .folder > .folder_title .feed_counts_floater > div {
+    display: flex;
+    align-items: center;
+}
+
+.NB-feedlist .folder > .folder_title .feed_counts_floater .unread_count {
+    margin: 0;
+    line-height: 1;
+}
+
+/* ---------------------------------------------------------------------------
+ * 22. Toolbar density
+ * The labelled layout switch needs roughly 320px, which only fits on wide
+ * screens. Below 1180px the labels collapse back to glyphs and the buttons
+ * return to their square shape, so the title block keeps its room.
+ * ------------------------------------------------------------------------ */
+
+@media (max-width: 1180px) {
+    .NB-toolbar-actions .NB-taskbar-layout .NB-task-title {
+        display: none;
+    }
+
+    #story_taskbar .NB-taskbar-layout .NB-taskbar-button {
+        width: 32px;
+        padding: 0;
+    }
+}
+
+
+
+/* ---------------------------------------------------------------------------
+ * 23. Image viewer
+ * Fixed overlay mounted on <body> by NEWSBLUR.Views.ImageViewer. It has to sit
+ * above the grid reader (grid.css puts that overlay at z-index 1200).
+ * ------------------------------------------------------------------------ */
+
+.NB-image-viewer {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 1300;
+}
+
+.NB-image-viewer.NB-open {
+    display: flex;
+    flex-direction: column;
+}
+
+.NB-image-viewer-backdrop {
+    position: absolute;
+    inset: 0;
+    background-color: rgba(10, 12, 16, 0.92);
+}
+
+.NB-image-viewer-stage {
+    position: relative;
+    flex: 1 1 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 0;
+    padding: 56px 72px 76px;
+    overflow: hidden;
+}
+
+.NB-image-viewer-image {
+    max-width: 100%;
+    max-height: 100%;
+    width: auto;
+    height: auto;
+    object-fit: contain;
+    border-radius: var(--nb-radius-sm);
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
+    cursor: zoom-in;
+}
+
+/* Zoomed in: the stage scrolls and the image keeps its natural size. */
+.NB-image-viewer-stage.NB-zoomed {
+    align-items: flex-start;
+    justify-content: flex-start;
+    overflow: auto;
+    cursor: zoom-out;
+}
+
+.NB-image-viewer-stage.NB-zoomed .NB-image-viewer-image {
+    max-width: none;
+    max-height: none;
+    margin: auto;
+    cursor: zoom-out;
+}
+
+.NB-image-viewer-close,
+.NB-image-viewer-nav {
+    position: absolute;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    border: 1px solid rgba(255, 255, 255, 0.24);
+    border-radius: var(--nb-radius-pill);
+    background-color: rgba(24, 28, 34, 0.72);
+    color: var(--nb-legacy-fff);
+    cursor: pointer;
+    transition: background-color var(--nb-dur-fast) var(--nb-ease),
+        border-color var(--nb-dur-fast) var(--nb-ease);
+}
+
+.NB-image-viewer-close:hover,
+.NB-image-viewer-nav:hover {
+    background-color: rgba(48, 54, 64, 0.92);
+    border-color: rgba(255, 255, 255, 0.4);
+}
+
+.NB-image-viewer-close {
+    top: 16px;
+    inset-inline-end: 16px;
+}
+
+/* The X is two crossed borders, so there is no icon asset to ship. */
+.NB-image-viewer-close-glyph {
+    position: relative;
+    width: 16px;
+    height: 16px;
+}
+
+.NB-image-viewer-close-glyph::before,
+.NB-image-viewer-close-glyph::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 0;
+    width: 16px;
+    height: 1.5px;
+    border-radius: 1px;
+    background-color: currentColor;
+}
+
+.NB-image-viewer-close-glyph::before {
+    transform: translateY(-50%) rotate(45deg);
+}
+
+.NB-image-viewer-close-glyph::after {
+    transform: translateY(-50%) rotate(-45deg);
+}
+
+.NB-image-viewer-nav {
+    top: 50%;
+    margin-top: -22px;
+}
+
+.NB-image-viewer-nav::before {
+    content: '';
+    width: 9px;
+    height: 9px;
+    border-top: 1.5px solid currentColor;
+    border-inline-end: 1.5px solid currentColor;
+}
+
+.NB-image-viewer-prev {
+    inset-inline-start: 16px;
+}
+
+.NB-image-viewer-next {
+    inset-inline-end: 16px;
+}
+
+.NB-image-viewer-prev::before {
+    margin-inline-start: 3px;
+    transform: rotate(-135deg);
+}
+
+.NB-image-viewer-next::before {
+    margin-inline-end: 3px;
+    transform: rotate(45deg);
+}
+
+.NB-image-viewer-single .NB-image-viewer-nav {
+    display: none;
+}
+
+.NB-image-viewer-caption {
+    position: relative;
+    flex: 0 0 auto;
+    display: flex;
+    align-items: baseline;
+    justify-content: center;
+    gap: var(--nb-space-3);
+    padding: 0 72px 20px;
+    color: rgba(255, 255, 255, 0.72);
+    font-size: var(--nb-fs-2);
+    text-align: center;
+}
+
+.NB-image-viewer-count {
+    flex: 0 0 auto;
+    color: rgba(255, 255, 255, 0.5);
+    font-variant-numeric: tabular-nums;
+}
+
+.NB-image-viewer-text {
+    max-width: 720px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.NB-image-viewer-error {
+    display: none;
+    color: rgba(255, 255, 255, 0.7);
+    font-size: var(--nb-fs-3);
+}
+
+.NB-image-viewer-error-state .NB-image-viewer-image {
+    display: none;
+}
+
+.NB-image-viewer-error-state .NB-image-viewer-error {
+    display: block;
+}
+
+body.NB-image-viewer-open {
+    overflow: hidden;
+}
+
+/* ---------------------------------------------------------------------------
+ * 24. Video embeds
+ * A bare video link becomes a facade: the poster and the play button render up
+ * front, the third party iframe only after the click, so a story with three
+ * links never loads three players on render.
+ * ------------------------------------------------------------------------ */
+
+.NB-feed-story-content .NB-video-embed {
+    position: relative;
+    display: block;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    margin: 4px 0 16px;
+    overflow: hidden;
+    border-radius: var(--nb-radius-md);
+    background-color: #0B0D10;
+}
+
+.NB-video-embed-no-poster {
+    background-image: linear-gradient(135deg, #1B2330, #0B0D10);
+}
+
+.NB-feed-story .NB-feed-story-content .NB-video-embed .NB-video-embed-poster {
+    position: absolute;
+    inset: 0;
+    /* core/04-story-content.css sizes every story image with !important, so the poster has to
+       outrank ".NB-feed-story .NB-feed-story-content img:not(.NB-score-icon)". */
+    width: 100% !important;
+    height: 100% !important;
+    max-width: none !important;
+    object-fit: cover;
+    border-radius: 0;
+    opacity: 0.86;
+}
+
+.NB-video-embed-play {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 60px;
+    height: 60px;
+    padding: 0;
+    border: 0;
+    border-radius: var(--nb-radius-pill);
+    background-color: rgba(255, 255, 255, 0.94);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    cursor: pointer;
+    transform: translate(-50%, -50%);
+    transition: transform var(--nb-dur-fast) var(--nb-ease),
+        background-color var(--nb-dur-fast) var(--nb-ease);
+}
+
+.NB-video-embed-play:hover {
+    background-color: var(--nb-legacy-fff);
+    transform: translate(-50%, -50%) scale(1.06);
+}
+
+/* CSS triangle: no play icon asset, and it inherits the accent color. */
+.NB-video-embed-glyph {
+    width: 0;
+    height: 0;
+    margin-inline-start: 4px;
+    border-style: solid;
+    border-width: 9px 0 9px 15px;
+    border-color: transparent transparent transparent var(--nb-accent);
+}
+
+.NB-video-embed-badge {
+    position: absolute;
+    inset-block-start: 10px;
+    inset-inline-start: 12px;
+    padding: 2px 8px;
+    border-radius: var(--nb-radius-pill);
+    background-color: rgba(10, 12, 16, 0.6);
+    color: var(--nb-legacy-fff);
+    font-size: var(--nb-fs-1);
+    font-weight: var(--nb-fw-medium);
+    letter-spacing: 0.02em;
+}
+
+.NB-video-embed-playing .NB-video-embed-poster,
+.NB-video-embed-playing .NB-video-embed-play,
+.NB-video-embed-playing .NB-video-embed-badge {
+    display: none;
+}
+
+.NB-video-embed iframe {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    border: 0;
+}
+
+@media (max-width: 768px) {
+    .NB-image-viewer-stage {
+        padding: 52px 12px 64px;
+    }
+
+    .NB-image-viewer-close {
+        top: 8px;
+        inset-inline-end: 8px;
+    }
+
+    .NB-image-viewer-nav {
+        width: 38px;
+        height: 38px;
+        margin-top: -19px;
+    }
+
+    .NB-image-viewer-prev {
+        inset-inline-start: 8px;
+    }
+
+    .NB-image-viewer-next {
+        inset-inline-end: 8px;
+    }
+
+    .NB-image-viewer-caption {
+        padding: 0 16px calc(16px + env(safe-area-inset-bottom));
+    }
+}
+
+@media (max-width: 620px) {
+    .NB-video-embed-play {
+        width: 52px;
+        height: 52px;
+    }
+
+    .NB-video-embed-glyph {
+        border-width: 8px 0 8px 13px;
+    }
+}
+
+
+/* 25. Navigation cleanup -------------------------------------------------- */
+
+/* The rail owns dashboard / all sites / saved / add, so the sidebar header is
+   now just the account name, the unread counters and the collapse handle. The
+   avatar moved to the rail footer, which makes it the single account entry. */
+
+.left-north {
+    padding: 0;
+    background-color: var(--nb-surface);
+}
+
+.NB-feeds-header-user {
+    display: flex;
+    align-items: center;
+    gap: var(--nb-space-2);
+    height: 42px;
+    padding: 0 6px 0 12px;
+    border-bottom: 1px solid var(--nb-border);
+    box-sizing: border-box;
+}
+
+.NB-feeds-header-user-name {
+    order: 1;
+    flex: 1 1 auto;
+    min-width: 0;
+    height: auto;
+    padding: 0;
+    overflow: hidden;
+    color: var(--nb-text);
+    font-size: var(--nb-fs-3);
+    font-weight: var(--nb-fw-semibold);
+    line-height: 1.2;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.NB-feeds-header-dashboard {
+    order: 2;
+    flex: 0 0 auto;
+    color: var(--nb-meta);
+    font-size: var(--nb-fs-1);
+    line-height: 1;
+}
+
+.NB-feeds-header-left {
+    display: flex;
+    align-items: center;
+    gap: var(--nb-space-1);
+}
+
+/* Each counter is an icon plus a number. The legacy pad was 16px, which is
+   wider than the 8px glyph, so the icons drifted into the digits. */
+.NB-feeds-header-dashboard .NB-feeds-header-count {
+    padding: 0 0 0 12px;
+    background-position: 0 50%;
+    background-size: 8px;
+    line-height: 1.6;
+}
+
+/* A zero counter is noise: the account row only reports what is waiting. */
+.NB-feeds-header-dashboard .NB-feeds-header-count.NB-empty {
+    display: none;
+}
+
+.NB-feeds-header-collapse-sidebar {
+    order: 3;
+    position: static;
+    flex: 0 0 auto;
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border-radius: var(--nb-radius-xs);
+    opacity: .55;
+    cursor: pointer;
+    transition: background-color var(--nb-dur-fast) var(--nb-ease);
+}
+
+.NB-feeds-header-collapse-sidebar:hover {
+    background-color: var(--nb-hover);
+    opacity: 1;
+}
+
+.NB-feeds-header-collapse-sidebar img {
+    width: 16px;
+    height: 16px;
+    opacity: .85;
+}
+
+/* The feed filter row is the only search affordance left in the sidebar and it
+   now carries the collapse-all-folders control. */
+.NB-feeds-selector {
+    box-sizing: border-box;
+    align-items: center;
+    gap: var(--nb-space-1);
+    padding: 5px 8px 5px 10px;
+    background-color: var(--nb-surface);
+    border-bottom: 1px solid var(--nb-border);
+}
+
+.NB-feeds-selector .NB-search-input {
+    flex: 1 1 auto;
+    width: auto;
+    min-width: 0;
+    height: 30px;
+    margin: 0;
+    padding: 0 10px;
+    background-color: var(--nb-surface-2);
+    border: 1px solid transparent;
+    border-radius: var(--nb-radius-pill);
+    color: var(--nb-text);
+    font-size: var(--nb-fs-2);
+    font-weight: var(--nb-fw-normal);
+    box-shadow: none;
+    transition: border-color var(--nb-dur-fast) var(--nb-ease),
+                background-color var(--nb-dur-fast) var(--nb-ease);
+}
+
+.NB-feeds-selector .NB-search-input::placeholder {
+    color: var(--nb-meta);
+    font-weight: var(--nb-fw-normal);
+}
+
+.NB-feeds-selector .NB-search-input:focus {
+    background-color: var(--nb-surface);
+    border-color: var(--nb-accent);
+    box-shadow: 0 0 0 3px var(--nb-accent-soft);
+}
+
+body.NB-dark .NB-feeds-selector .NB-search-input {
+    background-color: var(--nb-surface-2);
+    border-color: transparent;
+    color: var(--nb-text);
+}
+
+body.NB-dark .NB-feeds-selector .NB-search-input:focus {
+    background-color: var(--nb-surface);
+    border-color: var(--nb-accent);
+}
+
+/* Two stacked chevrons: up means "collapse every folder", flipped means
+   "expand every folder". The legacy sprite lived under the removed
+   .NB-feeds-header-river-sites row, so nothing competes here. */
+.NB-feedlist-toggle-all-icon {
+    position: relative;
+    flex: 0 0 auto;
+    width: 24px;
+    height: 24px;
+    border-radius: var(--nb-radius-xs);
+    background: none;
+    color: var(--nb-meta);
+    cursor: pointer;
+    opacity: .7;
+    transition: background-color var(--nb-dur-fast) var(--nb-ease),
+                opacity var(--nb-dur-fast) var(--nb-ease);
+}
+
+.NB-feedlist-toggle-all-icon:hover {
+    background-color: var(--nb-hover);
+    opacity: 1;
+}
+
+.NB-feedlist-toggle-all-icon::before,
+.NB-feedlist-toggle-all-icon::after {
+    content: "";
+    position: absolute;
+    inset-inline-start: 50%;
+    width: 6px;
+    height: 6px;
+    margin-inline-start: -3px;
+    border-top: 1.5px solid currentColor;
+    border-inline-end: 1.5px solid currentColor;
+    transform: rotate(-45deg);
+    transition: transform var(--nb-dur) var(--nb-ease);
+}
+
+.NB-feedlist-toggle-all-icon::before {
+    top: 5px;
+}
+
+.NB-feedlist-toggle-all-icon::after {
+    top: 11px;
+}
+
+.NB-feedlist-toggle-all-icon.NB-all-folders-collapsed::before,
+.NB-feedlist-toggle-all-icon.NB-all-folders-collapsed::after {
+    transform: rotate(135deg);
+}
+
+/* The sidebar footer lost its "+" button, so the first-run coach mark has to
+   point at the rail add button instead of the gear that is left behind. */
+.NB-callout-ftux {
+    position: fixed;
+    inset-inline-start: calc(var(--nb-rail-w) + 10px);
+    left: auto;
+    top: 190px;
+    bottom: auto !important;
+    z-index: 70;
+    padding: 2px 4px;
+    background-color: var(--nb-surface);
+    border: 1px solid var(--nb-border);
+    border-radius: var(--nb-radius-md);
+    box-shadow: var(--nb-shadow-lg);
+    color: var(--nb-text);
+}
+
+.NB-callout-ftux .NB-callout-text {
+    color: var(--nb-text);
+    font-size: var(--nb-fs-3);
+    font-weight: var(--nb-fw-semibold);
+}
+
+.NB-callout-ftux .NB-callout-container .NB-callout-arrow {
+    inset-inline-start: -7px;
+    left: auto;
+    bottom: 8px;
+    width: 0;
+    height: 0;
+    background: none;
+    border: 6px solid transparent;
+    border-inline-end-color: var(--nb-surface);
+}
+
+/* 26. Add popover --------------------------------------------------------- */
+
+/* The popover is anchored to the rail button now, so it opens to the right and
+   has to fit next to the 76px rail on every screen. */
+.NB-add-popover-container.popover {
+    max-width: calc(100vw - var(--nb-rail-w) - var(--nb-space-6));
+    background: var(--nb-surface);
+    border: 1px solid var(--nb-border);
+    border-radius: var(--nb-radius-lg);
+    box-shadow: var(--nb-shadow-lg);
+}
+
+.NB-add-popover-container.popover .arrow {
+    display: none;
+}
+
+.NB-add-popover {
+    padding: 16px;
+}
+
+.NB-add-header {
+    margin: 0 0 12px;
+    color: var(--nb-text);
+    font-size: var(--nb-fs-5);
+    font-weight: var(--nb-fw-semibold);
+}
+
+.NB-add-header-icon {
+    width: 24px;
+    height: 24px;
+    background: var(--nb-accent);
+    border-radius: var(--nb-radius-sm);
+    color: var(--nb-on-accent);
+    font-size: 16px;
+}
+
+.NB-add-folder-row .NB-folders,
+.NB-add-folder-row .NB-add-folder-icon {
+    color: var(--nb-text-2);
+}
+
+.NB-add-input-row {
+    background-color: var(--nb-surface-2);
+    border: 1px solid var(--nb-border);
+    border-radius: var(--nb-radius-md);
+}
+
+.NB-add-input-row:focus-within {
+    border-color: var(--nb-accent);
+    box-shadow: 0 0 0 3px var(--nb-accent-soft);
+}
+
+.NB-add-input-row .NB-add-url {
+    padding: 10px 12px;
+    color: var(--nb-text);
+    font-size: var(--nb-fs-4);
+}
+
+.NB-add-input-row .NB-add-url::placeholder {
+    color: var(--nb-meta);
+}
+
+.NB-add-input-row .NB-add-url-submit {
+    padding: 0 16px;
+    background: var(--nb-accent);
+    border-radius: 0 var(--nb-radius-md) var(--nb-radius-md) 0;
+    color: var(--nb-on-accent);
+    font-size: var(--nb-fs-3);
+    font-weight: var(--nb-fw-semibold);
+}
+
+.NB-add-input-row .NB-add-url-submit:hover {
+    background: var(--nb-accent-hover);
+}
+
+.NB-add-folder-input-row {
+    background-color: var(--nb-surface-2);
+    border: 1px solid var(--nb-border);
+    border-radius: var(--nb-radius-md);
+}
+
+.NB-add-folder-input-row:focus-within {
+    border-color: var(--nb-accent);
+    box-shadow: 0 0 0 3px var(--nb-accent-soft);
+}
+
+.NB-add-folder-input-row .NB-add-folder-input {
+    color: var(--nb-text);
+}
+
+.NB-add-folder-input-row .NB-add-folder-submit {
+    background: var(--nb-accent);
+    color: var(--nb-on-accent);
+}
+
+.NB-add-browse-row {
+    margin: 10px 0 0;
+    text-align: end;
+}
+
+.NB-add-browse {
+    display: inline-block;
+    padding: 2px 0;
+    color: var(--nb-accent);
+    font-size: var(--nb-fs-3);
+    font-weight: var(--nb-fw-medium);
+    cursor: pointer;
+}
+
+.NB-add-browse:hover {
+    color: var(--nb-accent-hover);
+    text-decoration: underline;
+}
+
+body.NB-dark .NB-add-popover-container.popover {
+    background: var(--nb-surface);
+    border-color: var(--nb-border);
+}
+
+body.NB-dark .NB-add-input-row .NB-add-url,
+body.NB-dark .NB-add-folder-input-row .NB-add-folder-input {
+    color: var(--nb-text);
+}
+
+/* dark/02-panes.css:1275 paints every text input #505050 and dark/01-base.css:530
+   paints the submit #4a73b0, both at a specificity a plain class cannot beat. */
+body.NB-dark .NB-add-popover .NB-add-input-row .NB-add-url,
+body.NB-dark .NB-add-popover .NB-add-folder-input-row .NB-add-folder-input {
+    background-color: var(--nb-surface-2);
+    border-color: var(--nb-border);
+    color: var(--nb-text);
+}
+
+body.NB-dark .NB-add-popover .NB-add-input-row .NB-add-url-submit,
+body.NB-dark .NB-add-popover .NB-add-folder-input-row .NB-add-folder-submit {
+    background: var(--nb-accent);
+    color: var(--nb-on-accent);
+}
+
+body.NB-dark .NB-add-header {
+    color: var(--nb-text);
+}
+
+/* 27. Phone-width overlays ------------------------------------------------ */
+
+/* The popover, the preferences dialog and the account dialog are all wider
+   than a phone. Clamp them to the viewport instead of letting them run off
+   both edges (Chrome zooms the layout out when a fixed element overflows). */
+
+@media (max-width: 768px) {
+    .NB-add-popover-container.popover {
+        position: fixed !important;
+        inset-inline: var(--nb-space-3) !important;
+        left: var(--nb-space-3) !important;
+        right: var(--nb-space-3) !important;
+        top: auto !important;
+        bottom: calc(var(--nb-rail-h) + var(--nb-space-3)) !important;
+        width: auto !important;
+        max-width: none !important;
+        max-height: calc(100vh - var(--nb-rail-h) - var(--nb-space-6));
+        overflow-y: auto;
+    }
+
+    .NB-callout-ftux {
+        display: none !important;
+    }
+
+    #simplemodal-container {
+        left: var(--nb-space-3) !important;
+        right: var(--nb-space-3) !important;
+        top: var(--nb-space-3) !important;
+        width: auto !important;
+        max-width: none !important;
+        height: auto !important;
+        max-height: calc(100vh - var(--nb-space-6)) !important;
+        margin: 0 !important;
+        box-sizing: border-box;
+    }
+
+    /* The organizer's action column floats right at 27% of the dialog, which is
+       88px on a phone while the folder pickers in it are 164px wide. Put the
+       column above the feed list and let the pickers fill it. */
+    .NB-modal-organizer .NB-organizer-sidebar {
+        float: none;
+        width: auto;
+    }
+
+    .NB-modal-organizer .NB-folders {
+        width: 100%;
+        max-width: 100%;
+        box-sizing: border-box;
+    }
+
+    /* The trainer's match-type control and its input share one row that cannot
+       shrink below 399px, so the control hung past the dialog on a phone. Stack
+       them, and let the sentiment explainer wrap instead of running off. */
+    .NB-modal-classifiers .NB-classifier-input-row {
+        flex-wrap: wrap;
+        row-gap: 6px;
+    }
+
+    .NB-modal-classifiers .NB-classifier-input-row .NB-classifier-exact-input,
+    .NB-modal-classifiers .NB-classifier-input-row .NB-classifier-regex-input-inline {
+        flex: 1 1 100%;
+        min-width: 0;
+    }
+
+    .NB-classifier-explainer .NB-explainer-hierarchy {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        row-gap: 4px;
+        max-width: 100%;
+        box-sizing: border-box;
+    }
+
+    /* The tag and author chips are inline-flex boxes that never wrap their
+       label, so a long author name (and the scope buttons beside it) ran past
+       the clipping row. */
+    .NB-modal-classifiers .NB-classifier-container {
+        max-width: 100%;
+        box-sizing: border-box;
+    }
+
+    .NB-modal-classifiers .NB-classifier-container .NB-classifier,
+    .NB-modal-classifiers .NB-classifier-container label {
+        white-space: normal;
+        overflow-wrap: anywhere;
+        min-width: 0;
+    }
+
+    .NB-modal-preferences .NB-preference .NB-preference-label,
+    .NB-modal-preferences .NB-preference .NB-preference-options {
+        float: none;
+        width: auto;
+    }
+
+    /* The timezone picker is 333px wide and the account name and email fields
+       are 306px, both wider than the 278px column they sit in on a phone. */
+    .NB-modal-preferences .NB-preference .NB-preference-options select,
+    .NB-modal-account .NB-preference .NB-preference-options select {
+        max-width: 100%;
+        box-sizing: border-box;
+    }
+
+    .NB-modal-account .NB-preference-username input,
+    .NB-modal-account .NB-preference-email input {
+        width: 100%;
+        max-width: 100%;
+        box-sizing: border-box;
+        margin-inline: 0;
+    }
+
+    /* "Saved stories older than [3] [days]" keeps its label and two pickers on
+       one 258px row that does not fit the 208px column on a small phone. */
+    .NB-modal-account .NB-preference-saved-stories-date,
+    .NB-modal-account .NB-preference-shared-stories-date {
+        flex-wrap: wrap;
+        row-gap: 4px;
+    }
+
+    .NB-modal-preferences .NB-preference .NB-preference-options {
+        margin-top: var(--nb-space-2);
+    }
+
+    /* "Complete / Split", "List / Grid / Magazine" and the read-filter pills
+       share a row whose four items are 248px wide inside a 208px column on a
+       small phone (the segmented control sets flex: 1 1 0 on every item), so the
+       last pill hung past the dialog. Let the row wrap and size the items by
+       their labels instead of by an equal share. */
+    .NB-modal-preferences .NB-preference-options .segmented-control {
+        flex-wrap: wrap;
+    }
+
+    .NB-modal-preferences .NB-preference-options .segmented-control li {
+        flex: 1 1 auto;
+        padding-inline: 6px;
+    }
+
+    .NB-modal-tabs {
+        overflow-x: auto;
+        flex-wrap: nowrap;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    /* Long tab names used to wrap onto two lines and eat half the dialog. */
+    .NB-modal .NB-modal-tab {
+        flex: 0 0 auto;
+        white-space: nowrap;
+    }
+
+    /* Grid card actions are revealed on hover, and touch screens never hover.
+       Keep them on screen and at a size a thumb can hit. */
+    .NB-grid-card-actions {
+        opacity: 1;
+        transform: none;
+        pointer-events: auto;
+        padding: 3px;
+    }
+
+    .NB-grid-card-action {
+        width: 32px;
+        height: 32px;
+    }
+
+}
+
+/* 28. Translation --------------------------------------------------------- */
+
+/* One button, two surfaces: it swaps the list headlines in place and drops a
+   translated block under each body paragraph. .NB-active means "this feed is
+   being translated", which the view keeps in localStorage per feed. */
+
+.NB-toolbar-actions .NB-toolbar-translate {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    flex: 0 0 auto;
+    height: 32px;
+    margin: 0 0 0 var(--nb-space-1);
+    padding: 0 9px;
+    border: 1px solid transparent;
+    border-radius: var(--nb-radius-sm);
+    background: transparent;
+    color: var(--nb-text-2);
+    font-family: var(--nb-font);
+    font-size: var(--nb-fs-2);
+    font-weight: var(--nb-fw-medium);
+    line-height: 1;
+    cursor: pointer;
+    transition: background-color var(--nb-dur-fast) var(--nb-ease),
+        color var(--nb-dur-fast) var(--nb-ease);
+}
+
+.NB-toolbar-actions .NB-toolbar-translate:hover {
+    background-color: var(--nb-hover);
+    color: var(--nb-text);
+}
+
+.NB-toolbar-actions .NB-toolbar-translate.NB-active {
+    background-color: var(--nb-accent-soft);
+    color: var(--nb-accent);
+}
+
+/* The icon is a mask, not a background image, so it inherits the button color
+   and follows the light and dark themes without a second asset. */
+.NB-toolbar-translate-icon {
+    flex: 0 0 16px;
+    width: 16px;
+    height: 16px;
+    background-color: currentColor;
+    -webkit-mask-image: url('/media/img/icons/phosphor-fill/translate-fill.svg');
+    mask-image: url('/media/img/icons/phosphor-fill/translate-fill.svg');
+    -webkit-mask-size: 16px 16px;
+    mask-size: 16px 16px;
+    -webkit-mask-repeat: no-repeat;
+    mask-repeat: no-repeat;
+    -webkit-mask-position: center;
+    mask-position: center;
+}
+
+.NB-toolbar-translate-label {
+    white-space: nowrap;
+}
+
+body.NB-dark .NB-toolbar-actions .NB-toolbar-translate.NB-active {
+    color: var(--nb-accent);
+}
+
+/* Body translations sit under the source paragraph behind an accent rule, so the
+   original stays readable right above them. */
+.NB-translation {
+    margin: 4px 0 0;
+    padding-inline-start: 10px;
+    border-inline-start: 2px solid var(--nb-accent);
+    color: var(--nb-text-2);
+    font-size: var(--nb-fs-4);
+    line-height: var(--nb-lh-relaxed);
+}
+
+.NB-translation + .NB-translation {
+    margin-top: 2px;
+}
+
+@media (max-width: 1180px) {
+    .NB-toolbar-actions .NB-toolbar-translate {
+        width: 32px;
+        padding: 0;
+        justify-content: center;
+    }
+
+    .NB-toolbar-translate-label {
+        display: none;
+    }
+}
+
+
+/* ---
+ * 29. Saved searches, filters and tags
+ * --- */
+.NB-saved-searches {
+    padding: 4px 0 2px;
+}
+.NB-saved-searches-header {
+    display: flex;
+    align-items: center;
+    gap: var(--nb-space-2);
+    padding: 6px 12px 4px 16px;
+    color: var(--nb-meta);
+    font-size: var(--nb-fs-2);
+    font-weight: var(--nb-fw-semibold);
+    letter-spacing: .02em;
+    text-transform: uppercase;
+}
+.NB-saved-searches-title { flex: 1 1 auto; }
+.NB-saved-searches-save {
+    height: 22px;
+    padding: 0 8px;
+    border: 1px solid var(--nb-border-strong);
+    border-radius: var(--nb-radius-pill);
+    background: transparent;
+    color: var(--nb-text-2);
+    font-size: var(--nb-fs-2);
+    cursor: pointer;
+}
+.NB-saved-searches-save:hover { background: var(--nb-hover); color: var(--nb-text); }
+.NB-saved-searches-list { margin: 0; padding: 0; list-style: none; }
+.NB-saved-searches-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 2px var(--nb-space-2);
+    padding: 5px 12px 5px 26px;
+    border-radius: var(--nb-radius-sm);
+    cursor: pointer;
+}
+.NB-saved-searches-row:hover { background: var(--nb-hover); }
+.NB-saved-searches-name {
+    overflow: hidden;
+    color: var(--nb-text);
+    font-size: var(--nb-fs-3);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.NB-saved-searches-query {
+    grid-column: 1 / 2;
+    overflow: hidden;
+    color: var(--nb-meta);
+    font-size: var(--nb-fs-2);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.NB-saved-searches-delete {
+    grid-row: 1 / span 2;
+    grid-column: 2 / 3;
+    width: 20px;
+    height: 20px;
+    border: 0;
+    border-radius: var(--nb-radius-xs);
+    background: transparent;
+    color: var(--nb-meta);
+    font-size: 14px;
+    line-height: 1;
+    opacity: 0;
+    cursor: pointer;
+}
+.NB-saved-searches-row:hover .NB-saved-searches-delete { opacity: 1; }
+.NB-saved-searches-delete:hover { background: var(--nb-surface-2); color: var(--nb-text); }
+
+/* Filters dialog */
+.NB-filters-dialog { padding: 18px 20px 14px; }
+.NB-filters-title { margin: 0 0 4px; color: var(--nb-text); font-size: var(--nb-fs-6); font-weight: var(--nb-fw-semibold); }
+.NB-filters-hint { margin: 0 0 14px; color: var(--nb-meta); font-size: var(--nb-fs-3); line-height: var(--nb-lh-normal); }
+.NB-filters-list { margin: 0 0 14px; padding: 0; list-style: none; }
+.NB-filter-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, .9fr) 34px repeat(3, 26px);
+    align-items: center;
+    gap: var(--nb-space-2);
+    padding: 6px 4px;
+    border-bottom: 1px solid var(--nb-border);
+    font-size: var(--nb-fs-3);
+}
+.NB-filter-row.NB-filter-disabled { opacity: .5; }
+.NB-filter-pattern-text { overflow: hidden; color: var(--nb-text); font-weight: var(--nb-fw-medium); text-overflow: ellipsis; white-space: nowrap; }
+.NB-filter-where, .NB-filter-action-text { overflow: hidden; color: var(--nb-text-2); text-overflow: ellipsis; white-space: nowrap; }
+.NB-filter-hits { color: var(--nb-meta); font-variant-numeric: tabular-nums; text-align: end; }
+.NB-filter-row button {
+    width: 26px;
+    height: 26px;
+    border: 0;
+    border-radius: var(--nb-radius-xs);
+    background: transparent;
+    color: var(--nb-meta);
+    font-size: 13px;
+    line-height: 1;
+    cursor: pointer;
+}
+.NB-filter-row button:hover { background: var(--nb-hover); color: var(--nb-text); }
+.NB-filter-running { color: var(--nb-accent) !important; }
+.NB-filter-empty { padding: 10px 4px; color: var(--nb-meta); font-size: var(--nb-fs-3); }
+.NB-filters-form { display: flex; flex-direction: column; gap: 8px; }
+.NB-filters-form-row { display: flex; align-items: center; gap: 8px; }
+.NB-filters-label { flex: 0 0 52px; color: var(--nb-text-2); font-size: var(--nb-fs-3); }
+.NB-filters-dialog input[type="text"] {
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 30px;
+    padding: 0 10px;
+    border: 1px solid var(--nb-border-strong);
+    border-radius: var(--nb-radius-sm);
+    background: var(--nb-surface);
+    color: var(--nb-text);
+    font-size: var(--nb-fs-3);
+}
+.NB-filters-dialog select {
+    flex: 0 0 auto;
+    max-width: 150px;
+    height: 30px;
+    border: 1px solid var(--nb-border-strong);
+    border-radius: var(--nb-radius-sm);
+    background: var(--nb-surface);
+    color: var(--nb-text);
+    font-size: var(--nb-fs-3);
+}
+.NB-filter-add {
+    flex: 0 0 auto;
+    height: 30px;
+    padding: 0 12px;
+    border: 1px solid var(--nb-border-strong);
+    border-radius: var(--nb-radius-sm);
+    background: var(--nb-surface);
+    color: var(--nb-text);
+    font-size: var(--nb-fs-3);
+    cursor: pointer;
+}
+.NB-filter-add:hover { background: var(--nb-hover); }
+.NB-filters-footer { display: flex; justify-content: flex-end; margin-top: 14px; }
+body.NB-dark .NB-filters-dialog input[type="text"],
+body.NB-dark .NB-filters-dialog select,
+body.NB-dark .NB-filter-add { background: var(--nb-surface-2); border-color: var(--nb-border) }
+
+/* Story tags */
+.NB-story-tags { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 10px; }
+.NB-story-tags-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.NB-story-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: 22px;
+    padding: 0 4px 0 8px;
+    border-radius: var(--nb-radius-pill);
+    background: var(--nb-accent-soft);
+    color: var(--nb-accent);
+    font-size: var(--nb-fs-2);
+    font-weight: var(--nb-fw-medium);
+}
+.NB-story-tag-remove {
+    width: 14px;
+    height: 14px;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    color: inherit;
+    font-size: 12px;
+    line-height: 1;
+    opacity: .6;
+    cursor: pointer;
+}
+.NB-story-tag-remove:hover { opacity: 1; background: var(--nb-surface) }
+.NB-story-tag-add {
+    height: 22px;
+    padding: 0 8px;
+    border: 1px dashed var(--nb-border-strong);
+    border-radius: var(--nb-radius-pill);
+    background: transparent;
+    color: var(--nb-meta);
+    font-size: var(--nb-fs-2);
+    cursor: pointer;
+}
+.NB-story-tag-add:hover { background: var(--nb-hover); color: var(--nb-text) }
+body.NB-dark .NB-story-tag { background: var(--nb-accent-soft); color: var(--nb-accent) }
+
+.NB-menu-manage-export .NB-menu-manage-link,
+.NB-menu-manage-import-settings .NB-menu-manage-link {
+    display: flex;
+    align-items: center;
+    gap: var(--nb-space-2);
+    width: 100%;
+    height: 100%;
+    color: inherit;
+    text-decoration: none;
+}
+
+/* 30. Messages ----------------------------------------------------------- */
+
+.NB-message-toast {
+    position: fixed;
+    inset-block-end: 24px;
+    inset-inline-start: 50%;
+    transform: translate(-50%, 8px);
+    z-index: 1400;
+    max-width: min(90vw, 460px);
+    padding: 10px 16px;
+    border: 1px solid var(--nb-border);
+    border-radius: var(--nb-radius-md);
+    background-color: var(--nb-surface);
+    box-shadow: var(--nb-shadow-lg);
+    color: var(--nb-text);
+    font-size: var(--nb-fs-3);
+    line-height: 1.45;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity var(--nb-dur-fast) var(--nb-ease), transform var(--nb-dur-fast) var(--nb-ease);
+}
+.NB-message-toast.NB-visible { opacity: 1; transform: translate(-50%, 0); }
+@media (max-width: 768px) {
+    .NB-message-toast { inset-block-end: 72px; }
+}
+
+
+/* -------------------------------------------------------------------------
+ * 31. Mobile story bar
+ * ---------------------------------------------------------------------- */
+
+/* A story opened from the list expands in place, which on a phone leaves no way
+   back except scrolling up to the headline and tapping it again. The bar is the
+   first child of the story, so it sticks to the top of the scrolling pane for as
+   long as the story is open. */
+.NB-story-mobile-bar {
+    display: none;
+}
+
+/* 380px and below the toolbar has no room left: the mark-as-read check goes,
+   and so does the Style popover, whose layout and column controls do nothing at
+   this width and whose font controls live in Preferences too. */
+@media (max-width: 380px) {
+    .NB-feedbar .NB-feedbar-mark-feed-read-container {
+        display: none;
+    }
+
+    .NB-feedbar .NB-taskbar-options-container {
+        display: none;
+    }
+}
+
+@media (max-width: 768px) {
+    #story_titles {
+        scroll-padding-block-start: 44px;
+    }
+
+    /* The mark-as-read check comes back at this width, and its legacy 18px
+       inline box is below a comfortable touch target. */
+    .NB-feedbar .NB-feedbar-mark-feed-read-container {
+        align-items: center;
+        height: 100%;
+    }
+
+    .NB-feed-story .NB-story-tag-add {
+        min-height: 30px;
+        padding: 0 10px;
+    }
+
+    .NB-feedbar .NB-feedbar-mark-feed-read {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 32px;
+        height: 32px;
+        padding: 0;
+        border-radius: var(--nb-radius-sm);
+    }
+
+    .NB-story-mobile-bar {
+        position: sticky;
+        top: 0;
+        z-index: 3;
+        display: flex;
+        align-items: center;
+        gap: var(--nb-space-2);
+        height: 44px;
+        margin: 0 0 var(--nb-space-2);
+        padding: 0 var(--nb-space-1);
+        background-color: var(--nb-surface);
+        border-bottom: 1px solid var(--nb-border);
+    }
+
+    .NB-story-mobile-back,
+    .NB-story-mobile-next {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        flex: 0 0 auto;
+        height: 32px;
+        padding: 0 8px;
+        border: 0;
+        border-radius: var(--nb-radius-sm);
+        background: none;
+        color: var(--nb-text-2);
+        font-family: var(--nb-font);
+        font-size: var(--nb-fs-3);
+        font-weight: var(--nb-fw-medium);
+        cursor: pointer;
+    }
+    .NB-story-mobile-next {
+        width: 32px;
+        padding: 0;
+    }
+    .NB-story-mobile-back:hover,
+    .NB-story-mobile-next:hover {
+        background-color: var(--nb-hover);
+        color: var(--nb-text);
+    }
+    .NB-story-mobile-back:active,
+    .NB-story-mobile-next:active {
+        background-color: var(--nb-active);
+    }
+
+    .NB-story-mobile-icon {
+        display: block;
+        width: 16px;
+        height: 16px;
+        background-color: currentColor;
+        -webkit-mask-repeat: no-repeat;
+        mask-repeat: no-repeat;
+        -webkit-mask-position: center;
+        mask-position: center;
+        -webkit-mask-size: 16px 16px;
+        mask-size: 16px 16px;
+    }
+    .NB-story-mobile-icon-back {
+        -webkit-mask-image: url('/media/img/icons/nouns/nav-left.svg');
+        mask-image: url('/media/img/icons/nouns/nav-left.svg');
+    }
+    .NB-story-mobile-icon-next {
+        -webkit-mask-image: url('/media/img/icons/nouns/nav-right.svg');
+        mask-image: url('/media/img/icons/nouns/nav-right.svg');
+    }
+
+    .NB-story-mobile-feed {
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        color: var(--nb-meta);
+        font-size: var(--nb-fs-2);
+        white-space: nowrap;
+        text-overflow: ellipsis;
+    }
+
+    [dir='rtl'] .NB-story-mobile-icon-back {
+        transform: scaleX(-1);
+    }
+    [dir='rtl'] .NB-story-mobile-icon-next {
+        transform: scaleX(-1);
+    }
+
+    body.NB-dark .NB-story-mobile-bar {
+        background-color: var(--nb-surface);
+        border-bottom-color: var(--nb-border);
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ * 32. Drag to reorder
+ *
+ * reader.js load_sortable_feeds() makes every folder level its own sortable, so
+ * a site can be dragged inside its folder but never into another one. The
+ * placeholder is a plain <li> that jQuery UI tags with .NB-feeds-list-highlight;
+ * because a class name is configured, jQuery UI leaves its height alone
+ * (jquery-ui-1.13.1.js:4198 returns early), so the drop line is drawn here.
+ * The 2013 rule in core/02-feed-list.css:851 painted it orange with side borders.
+ */
+.NB-feedlist li.feed {
+    cursor: grab;
+}
+
+/* Rows are links to the site; without this a slow drag starts an HTML5 drag of
+   the <a> instead of the sortable. */
+.NB-feedlist li.feed a,
+.NB-feedlist li.feed .feed_title,
+.NB-feedlist li.feed .feed_favicon {
+    -webkit-user-drag: none;
+    user-select: none;
+}
+
+.NB-feedlist .NB-feeds-list-highlight {
+    height: 3px !important;
+    margin: 2px 0;
+    padding: 0;
+    border: 0;
+    border-radius: var(--nb-radius-pill);
+    background-color: var(--nb-accent);
+    list-style: none;
+    position: relative;
+}
+
+.NB-feedlist .NB-feeds-list-highlight::before {
+    content: '';
+    position: absolute;
+    inset-inline-start: -3px;
+    inset-block-start: -2px;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background-color: var(--nb-accent);
+}
+
+.NB-feedlist li.NB-feed-sorting {
+    border-radius: var(--nb-radius-sm);
+    background-color: var(--nb-surface);
+    box-shadow: var(--nb-shadow-md);
+}
+
+/* jQuery UI injects a global "cursor: move !important" style while dragging
+   (jquery-ui-1.13.1.js:3526), so only the helper's shadow is ours to style. */
+body.NB-feed-dragging .NB-feedlist li.feed:hover {
+    background-color: transparent;
+}
+
+body.NB-dark .NB-feedlist li.NB-feed-sorting {
+    background-color: var(--nb-surface-2);
+}
+
+
+/* 33. Disk usage ---------------------------------------------------------- */
+
+.NB-storage-usage {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+}
+
+.NB-storage-usage-total {
+    color: var(--nb-text);
+    font-size: var(--nb-fs-5);
+    font-weight: var(--nb-fw-semibold);
+    font-variant-numeric: tabular-nums;
+    line-height: 1.2;
+}
+
+.NB-storage-usage-parts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px 10px;
+    color: var(--nb-meta);
+    font-size: var(--nb-fs-2);
+    line-height: 1.4;
+}
+
+.NB-storage-usage-part {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 4px;
+    white-space: nowrap;
+}
+
+.NB-storage-usage-part-size {
+    color: var(--nb-text-2);
+    font-variant-numeric: tabular-nums;
+}
+
+.NB-storage-usage-host {
+    color: var(--nb-meta);
+    font-size: var(--nb-fs-2);
+    font-variant-numeric: tabular-nums;
+    line-height: 1.4;
+}
+
+/* 34. Feed chooser -------------------------------------------------------- */
+
+.NB-modal-feedchooser .NB-feedchooser-header {
+    padding: 0 0 12px;
+}
+
+.NB-modal-feedchooser .NB-feedchooser-header-hint {
+    color: var(--nb-meta);
+    font-size: var(--nb-fs-2);
+    line-height: 1.45;
+}
+
+/* 35. Refresh ------------------------------------------------------------- */
+
+/* One toolbar button, plus a pull gesture on phones. The button spins while
+   the server round trip runs; the pull indicator follows the finger and turns
+   accent colored once releasing would refresh. */
+
+.NB-toolbar-actions .NB-toolbar-refresh {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: 32px;
+    height: 32px;
+    margin: 0 0 0 var(--nb-space-1);
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: var(--nb-radius-sm);
+    background: transparent;
+    color: var(--nb-text-2);
+    cursor: pointer;
+    transition: background-color var(--nb-dur-fast) var(--nb-ease),
+        color var(--nb-dur-fast) var(--nb-ease);
+}
+
+.NB-toolbar-actions .NB-toolbar-refresh:hover {
+    background-color: var(--nb-hover);
+    color: var(--nb-text);
+}
+
+.NB-toolbar-refresh-icon {
+    width: 16px;
+    height: 16px;
+    background-color: currentColor;
+    -webkit-mask-image: url('/media/img/icons/nouns/refresh.svg');
+    mask-image: url('/media/img/icons/nouns/refresh.svg');
+    -webkit-mask-size: 16px 16px;
+    mask-size: 16px 16px;
+    -webkit-mask-repeat: no-repeat;
+    mask-repeat: no-repeat;
+    -webkit-mask-position: center;
+    mask-position: center;
+}
+
+.NB-feedbar.NB-refreshing .NB-toolbar-refresh-icon {
+    animation: nb-refresh-spin 900ms linear infinite;
+}
+
+@keyframes nb-refresh-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+.NB-pull-refresh {
+    position: fixed;
+    top: calc(var(--nb-toolbar-h, 52px) + 6px);
+    left: 50%;
+    z-index: 70;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 32px;
+    padding: 0 12px;
+    border: 1px solid var(--nb-border);
+    border-radius: var(--nb-radius-pill);
+    background-color: var(--nb-surface);
+    box-shadow: var(--nb-shadow-md);
+    color: var(--nb-meta);
+    font-family: var(--nb-font);
+    font-size: var(--nb-fs-2);
+    line-height: 1;
+    pointer-events: none;
+    opacity: 0;
+    transform: translate(-50%, -56px);
+    transition: opacity var(--nb-dur-fast) var(--nb-ease),
+        transform var(--nb-dur-fast) var(--nb-ease);
+}
+
+.NB-pull-refresh-icon {
+    width: 14px;
+    height: 14px;
+    background-color: currentColor;
+    -webkit-mask-image: url('/media/img/icons/nouns/refresh.svg');
+    mask-image: url('/media/img/icons/nouns/refresh.svg');
+    -webkit-mask-size: 14px 14px;
+    mask-size: 14px 14px;
+    -webkit-mask-repeat: no-repeat;
+    mask-repeat: no-repeat;
+    -webkit-mask-position: center;
+    mask-position: center;
+}
+
+.NB-pull-refresh.NB-pull-ready {
+    border-color: var(--nb-accent);
+    color: var(--nb-accent);
+}
+
+body.NB-dark .NB-pull-refresh {
+    background-color: var(--nb-surface-2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .NB-feedbar.NB-refreshing .NB-toolbar-refresh-icon {
+        animation: none;
+        opacity: 0.7;
+    }
+}
+
+/* 35b. Layout picker ------------------------------------------------------ */
+
+/* Below 1100px the five-glyph switch costs more width than the title block can
+   spare, so the toolbar keeps one glyph that mirrors the layout on screen and
+   opens the same choices in a popover. The popover clones the desktop list, so
+   the translated labels and the glyphs stay in one place. */
+
+.NB-toolbar-actions .NB-toolbar-layout-toggle {
+    display: none;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    order: 4;
+    width: 32px;
+    height: 32px;
+    margin: 0 0 0 var(--nb-space-1);
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: var(--nb-radius-sm);
+    background: transparent;
+    color: var(--nb-text-2);
+    cursor: pointer;
+    transition: background-color var(--nb-dur-fast) var(--nb-ease),
+        color var(--nb-dur-fast) var(--nb-ease);
+}
+
+.NB-toolbar-actions .NB-toolbar-layout-toggle:hover,
+.NB-toolbar-actions .NB-toolbar-layout-toggle.NB-active {
+    background-color: var(--nb-hover);
+    color: var(--nb-text);
+}
+
+.NB-toolbar-layout-toggle-icon {
+    width: 16px;
+    height: 16px;
+    background-color: currentColor;
+    -webkit-mask-size: 16px 16px;
+    mask-size: 16px 16px;
+    -webkit-mask-repeat: no-repeat;
+    mask-repeat: no-repeat;
+    -webkit-mask-position: center;
+    mask-position: center;
+    -webkit-mask-image: url('/media/img/icons/nouns/layout-list.svg');
+    mask-image: url('/media/img/icons/nouns/layout-list.svg');
+}
+
+.NB-toolbar-layout-toggle[data-layout="full"] .NB-toolbar-layout-toggle-icon {
+    -webkit-mask-image: url('/media/img/icons/nouns/layout-full.svg');
+    mask-image: url('/media/img/icons/nouns/layout-full.svg');
+}
+
+.NB-toolbar-layout-toggle[data-layout="split"] .NB-toolbar-layout-toggle-icon {
+    -webkit-mask-image: url('/media/img/icons/nouns/layout-split.svg');
+    mask-image: url('/media/img/icons/nouns/layout-split.svg');
+}
+
+.NB-toolbar-layout-toggle[data-layout="grid"] .NB-toolbar-layout-toggle-icon {
+    -webkit-mask-image: url('/media/img/icons/nouns/layout-grid.svg');
+    mask-image: url('/media/img/icons/nouns/layout-grid.svg');
+}
+
+.NB-toolbar-layout-toggle[data-layout="magazine"] .NB-toolbar-layout-toggle-icon {
+    -webkit-mask-image: url('/media/img/icons/nouns/layout-magazine.svg');
+    mask-image: url('/media/img/icons/nouns/layout-magazine.svg');
+}
+
+@media (max-width: 1100px) {
+    .NB-toolbar-actions .NB-toolbar-layout-toggle {
+        display: inline-flex;
+    }
+}
+
+/* The cloned list: one row per layout, glyph on the left, label on the right. */
+
+.NB-layout-popover-container .popover-content {
+    padding: 6px;
+}
+
+.NB-layout-menu {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.NB-layout-menu .NB-taskbar-button {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    box-sizing: border-box;
+    width: 100%;
+    height: 38px;
+    margin: 0;
+    padding: 0 10px;
+    border: 0;
+    border-radius: var(--nb-radius-sm);
+    background: transparent;
+    color: var(--nb-text-2);
+    font-size: var(--nb-fs-2);
+    line-height: 1;
+    cursor: pointer;
+}
+
+.NB-layout-menu .NB-taskbar-button:hover,
+.NB-layout-menu .NB-taskbar-button.NB-active {
+    background-color: var(--nb-hover);
+    color: var(--nb-text);
+}
+
+.NB-layout-menu .NB-taskbar-button.NB-active {
+    font-weight: var(--nb-fw-medium);
+}
+
+.NB-layout-menu .NB-task-title {
+    display: block;
+    white-space: nowrap;
+}
+
+.NB-layout-menu .NB-task-image {
+    position: static;
+    flex: 0 0 16px;
+    width: 16px;
+    height: 16px;
+    margin: 0;
+    background-color: currentColor;
+    -webkit-mask-size: 16px 16px;
+    mask-size: 16px 16px;
+    -webkit-mask-repeat: no-repeat;
+    mask-repeat: no-repeat;
+    -webkit-mask-position: center;
+    mask-position: center;
+}
+
+.NB-layout-menu .NB-task-layout-full .NB-task-image {
+    -webkit-mask-image: url('/media/img/icons/nouns/layout-full.svg');
+    mask-image: url('/media/img/icons/nouns/layout-full.svg');
+}
+
+.NB-layout-menu .NB-task-layout-split .NB-task-image {
+    -webkit-mask-image: url('/media/img/icons/nouns/layout-split.svg');
+    mask-image: url('/media/img/icons/nouns/layout-split.svg');
+}
+
+.NB-layout-menu .NB-task-layout-list .NB-task-image {
+    -webkit-mask-image: url('/media/img/icons/nouns/layout-list.svg');
+    mask-image: url('/media/img/icons/nouns/layout-list.svg');
+}
+
+.NB-layout-menu .NB-task-layout-grid .NB-task-image {
+    -webkit-mask-image: url('/media/img/icons/nouns/layout-grid.svg');
+    mask-image: url('/media/img/icons/nouns/layout-grid.svg');
+}
+
+.NB-layout-menu .NB-task-layout-magazine .NB-task-image {
+    -webkit-mask-image: url('/media/img/icons/nouns/layout-magazine.svg');
+    mask-image: url('/media/img/icons/nouns/layout-magazine.svg');
+}
+
+/* 36. Search results ------------------------------------------------------ */
+
+/* The bar sticks to the top of the list so the count and the way out stay
+   visible while the matches scroll. Marks reuse the classifier yellow so a
+   searched word reads the same in both filters. */
+
+.NB-search-summary {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    box-sizing: border-box;
+    height: 34px;
+    padding: 0 20px;
+    background-color: var(--nb-surface);
+    border-bottom: 1px solid var(--nb-border);
+    color: var(--nb-meta);
+    font-family: var(--nb-font);
+    font-size: var(--nb-fs-2);
+    line-height: 1;
+}
+
+.NB-search-summary-count {
+    color: var(--nb-text-2);
+    font-weight: var(--nb-fw-semibold);
+    font-variant-numeric: tabular-nums;
+}
+
+.NB-search-summary-clear {
+    flex: 0 0 auto;
+    margin-inline-start: auto;
+    height: 24px;
+    padding: 0 10px;
+    border: 1px solid var(--nb-border);
+    border-radius: var(--nb-radius-pill);
+    background: transparent;
+    color: var(--nb-text-2);
+    font-family: var(--nb-font);
+    font-size: var(--nb-fs-2);
+    line-height: 1;
+    cursor: pointer;
+    transition: background-color var(--nb-dur-fast) var(--nb-ease),
+        color var(--nb-dur-fast) var(--nb-ease);
+}
+
+.NB-search-summary-clear:hover {
+    background-color: var(--nb-hover);
+    border-color: var(--nb-border-strong);
+    color: var(--nb-text);
+}
+
+mark.NB-search-highlight {
+    padding: 0 1px;
+    border-radius: 2px;
+    background-color: #FFE9A3;
+    color: inherit;
+}
+
+body.NB-dark mark.NB-search-highlight {
+    background-color: rgba(255, 213, 79, 0.32);
+    color: var(--nb-text);
+}
+
+@media (max-width: 620px) {
+    .NB-search-summary {
+        padding: 0 12px;
+        gap: 6px;
+    }
+}
+
+/* 37. Swipe back ---------------------------------------------------------- */
+
+/* The story element is dragged with an inline transform while the gesture is
+   live, so only the resting state needs a rule here. */
+.NB-feed-story {
+    touch-action: pan-y pinch-zoom;
+}
+
+/* 38. Type floor ---------------------------------------------------------- */
+
+/* Nothing in a panel should read smaller than the 12px token. The statistics
+   chart and the organizer labels were the last 9-11px holdouts. */
+.NB-modal-statistics .NB-statistics-stat .NB-statistics-label,
+.NB-modal-statistics .NB-history-fetch,
+.NB-modal-statistics .NB-history-fetch-date,
+.NB-modal-statistics .NB-history-fetch-message,
+.NB-modal-statistics .NB-history-fetch-code,
+.NB-modal-statistics table,
+.NB-modal-statistics .NB-modal-feed-subscribers,
+.NB-modal-statistics .NB-statistics-stat .NB-statistics-history-hours-chart,
+.NB-modal-statistics .NB-history-empty,
+.NB-modal-organizer .NB-organizer-sidebar-title,
+.NB-modal-organizer .NB-organizer-action-title,
+.NB-modal-organizer .NB-organizer-hierarchy,
+.NB-modal-organizer .segmented-control li {
+    font-size: var(--nb-fs-2);
+}
+
+/* The full audit found more sub-12px chrome outside the two panels above: the
+   rail badge, the mark-read time chips, the exception modal's fetch history and
+   the feed chooser's helper links. Same floor, wider reach. */
+.NB-rail-badge {
+    font-size: 10px;
+}
+
+.NB-feedbar .NB-feedbar-mark-feed-read-time {
+    font-size: 10px;
+}
+
+.NB-modal-classifiers .NB-modal-header .NB-modal-feed-subscribers {
+    font-size: var(--nb-fs-2);
+}
+
+.NB-modal .NB-history-fetch .NB-history-fetch-date,
+.NB-modal .NB-history-fetch .NB-history-fetch-message,
+.NB-modal .NB-history-fetch .NB-history-fetch-code,
+.NB-modal .NB-markread-shortcut-hint {
+    font-size: var(--nb-fs-2);
+}
+
+.NB-sideoption .NB-sideoption-title {
+    font-size: var(--nb-fs-2);
+    line-height: 1.3;
+}
+
+.NB-modal-feedchooser .NB-feedchooser-info-sort,
+.NB-modal-feedchooser .NB-feedchooser-info-reset,
+.NB-modal-feedchooser .NB-feedchooser-usage-text,
+.NB-modal-feedchooser .NB-splash-link {
+    font-size: var(--nb-fs-2);
+}
+
+.NB-tryfeed-banner-subtext {
+    font-size: var(--nb-fs-2);
+}
+
+/* Tooltips were the last 10px text in the app (media/css/controls/jquery.tipsy.css). */
+.tipsy {
+    font-size: var(--nb-fs-2);
+}
+
+/* Manage card and sidebar chrome found in the same sweep. */
+.NB-menu-manage .NB-menu-manage-subtitle {
+    font-size: var(--nb-fs-2);
+}
+
+.NB-splash-modules .NB-menu-manage .NB-menu-item .NB-menu-manage-logout {
+    font-size: var(--nb-fs-2);
+}
+
+/* The XS..XL pills in the manage card are a size preview (9px to 15px on
+   purpose), so they are the one deliberate exception to the floor. */
+
+.NB-feeds-header-dashboard .NB-feeds-header-count {
+    font-size: var(--nb-fs-2);
+}
+
+/* .NB-storytitles-author, .feed_title and .story_date are deliberately scaled by
+   the feed-size preference (.NB-theme-feed-size-*), so they stay untouched. */
+
+/* The classifier pill is a real button, so 18px is too small a tap target. */
+@media (max-width: 768px) {
+    .NB-pill-view-classifier {
+        min-width: 28px;
+        min-height: 28px;
+    }
+}
+
+/* ==========================================================================
+   39. Empty states
+   The classifier, search and plain view empties share one surface. Legacy
+   painted it in the old purple palette, so the tokens carry it now.
+   ========================================================================== */
+
+.NB-classifier-filter-empty {
+    border-color: var(--nb-border);
+    border-radius: var(--nb-radius-lg);
+    background-color: var(--nb-surface);
+    color: var(--nb-text);
+    box-shadow: var(--nb-shadow-sm);
+}
+
+.NB-classifier-filter-empty-icon {
+    color: var(--nb-accent);
+    background-color: var(--nb-accent-soft);
+}
+
+.NB-classifier-filter-empty-copy {
+    color: var(--nb-meta);
+    font-size: var(--nb-fs-3);
+}
+
+.NB-classifier-filter-empty-actions button {
+    min-height: 32px;
+    padding: 0 12px;
+    border: 1px solid var(--nb-border-strong);
+    border-radius: var(--nb-radius-sm);
+    color: var(--nb-text-2);
+    background-color: var(--nb-surface);
+    font-size: var(--nb-fs-3);
+    font-weight: var(--nb-fw-medium);
+    transition: background-color var(--nb-dur-fast) var(--nb-ease),
+                border-color var(--nb-dur-fast) var(--nb-ease),
+                color var(--nb-dur-fast) var(--nb-ease);
+}
+
+.NB-classifier-filter-empty-actions button:hover,
+.NB-classifier-filter-empty-actions button:focus-visible {
+    border-color: var(--nb-accent);
+    color: var(--nb-accent);
+    background-color: var(--nb-accent-soft);
+    outline: 0;
+}
+
+.NB-classifier-filter-empty-actions .NB-classifier-filter-empty-widen {
+    border-color: var(--nb-accent) !important;
+    color: var(--nb-on-accent) !important;
+    background-color: var(--nb-accent) !important;
+}
+
+body.NB-dark .NB-classifier-filter-empty {
+    border-color: var(--nb-border);
+    background-color: var(--nb-surface);
+    color: var(--nb-text);
+}
+
+body.NB-dark .NB-classifier-filter-empty-icon {
+    color: var(--nb-accent);
+    background-color: var(--nb-accent-soft);
+}
+
+body.NB-dark .NB-classifier-filter-empty-copy {
+    color: var(--nb-meta);
+}
+
+body.NB-dark .NB-classifier-filter-empty-actions button {
+    border-color: var(--nb-border-strong);
+    color: var(--nb-text-2);
+    background-color: var(--nb-surface-2);
+}
+
+/* 39. Article typography --------------------------------------------------- */
+/* The story body was the last surface still wearing browser defaults: links in
+   default blue, code blocks with no padding, tables with 1px cells and no
+   rules, captions indistinguishable from body copy. Everything below reads
+   from tokens, so light and dark follow from the same rules, and logical
+   properties keep it correct under reader_rtl.css. */
+
+.NB-feed-story .NB-feed-story-content h1,
+.NB-feed-story .NB-feed-story-content h2,
+.NB-feed-story .NB-feed-story-content h3,
+.NB-feed-story .NB-feed-story-content h4,
+.NB-feed-story .NB-feed-story-content h5,
+.NB-feed-story .NB-feed-story-content h6 {
+    margin: var(--nb-space-5) 0 var(--nb-space-3);
+    color: var(--nb-text);
+    font-weight: var(--nb-fw-bold);
+    line-height: var(--nb-lh-tight);
+    letter-spacing: -0.01em;
+}
+
+.NB-feed-story .NB-feed-story-content h1 {
+    font-size: 26px;
+}
+
+.NB-feed-story .NB-feed-story-content h2 {
+    font-size: 21px;
+}
+
+.NB-feed-story .NB-feed-story-content h3 {
+    font-size: 17.5px;
+}
+
+.NB-feed-story .NB-feed-story-content h4 {
+    font-size: 15.5px;
+}
+
+.NB-feed-story .NB-feed-story-content h5,
+.NB-feed-story .NB-feed-story-content h6 {
+    font-size: 15px;
+    letter-spacing: 0;
+}
+
+.NB-feed-story .NB-feed-story-content > :first-child,
+.NB-feed-story .NB-feed-story-content > :first-child > :first-child {
+    margin-top: 0;
+}
+
+/* Links keep the underline (it is the only affordance that survives a custom
+   accent) but get the accent color and a lighter rule. */
+.NB-feed-story .NB-feed-story-content a {
+    color: var(--nb-accent);
+    text-decoration: underline;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 2px;
+}
+
+.NB-feed-story .NB-feed-story-content a:hover,
+.NB-feed-story .NB-feed-story-content a:focus-visible {
+    color: var(--nb-accent-hover);
+    text-decoration-thickness: 2px;
+}
+
+.NB-feed-story .NB-feed-story-content a.NB-feed-story-title,
+.NB-feed-story .NB-feed-story-content a.NB-story-image-link {
+    text-decoration: none;
+}
+
+.NB-feed-story .NB-feed-story-content strong,
+.NB-feed-story .NB-feed-story-content b {
+    font-weight: var(--nb-fw-bold);
+}
+
+/* Inline code sits on its own chip. box-decoration-break keeps the chip
+   intact when a long identifier wraps across lines. */
+.NB-feed-story .NB-feed-story-content code,
+.NB-feed-story .NB-feed-story-content kbd,
+.NB-feed-story .NB-feed-story-content samp {
+    padding: 1px 5px;
+    border: 1px solid var(--nb-border);
+    border-radius: var(--nb-radius-xs);
+    background-color: var(--nb-surface-2);
+    color: var(--nb-text);
+    font-family: var(--nb-font-mono);
+    font-size: 0.88em;
+    -webkit-box-decoration-break: clone;
+    box-decoration-break: clone;
+}
+
+/* Block code gets the chip's container treatment instead of a nested chip. */
+.NB-feed-story .NB-feed-story-content pre {
+    margin: var(--nb-space-4) 0;
+    padding: var(--nb-space-3) var(--nb-space-4);
+    border: 1px solid var(--nb-border);
+    border-radius: var(--nb-radius-md);
+    background-color: var(--nb-surface-2);
+    color: var(--nb-text);
+    font-size: var(--nb-fs-3);
+    line-height: 1.6;
+    tab-size: 4;
+    overflow-x: auto;
+}
+
+.NB-feed-story .NB-feed-story-content pre code,
+.NB-feed-story .NB-feed-story-content pre kbd,
+.NB-feed-story .NB-feed-story-content pre samp {
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background-color: transparent;
+    color: inherit;
+    font-size: inherit;
+    white-space: pre;
+}
+
+/* The legacy quote was a pale green card with no rule; make it a quiet
+   indent with an accent-neutral rule that works on both surfaces. */
+.NB-feed-story .NB-feed-story-content blockquote {
+    margin: var(--nb-space-4) 0;
+    padding: 2px 0 2px var(--nb-space-4);
+    border-inline-start: 3px solid var(--nb-border-strong);
+    border-radius: 0;
+    background-color: transparent;
+    color: var(--nb-text-2);
+    font-style: normal;
+}
+
+.NB-feed-story .NB-feed-story-content blockquote p:last-child {
+    margin-bottom: 0;
+}
+
+.NB-feed-story .NB-feed-story-content ul,
+.NB-feed-story .NB-feed-story-content ol {
+    margin: 0 0 var(--nb-space-3);
+    padding-inline-start: 22px;
+}
+
+.NB-feed-story .NB-feed-story-content li {
+    margin: 3px 0;
+}
+
+.NB-feed-story .NB-feed-story-content li > ul,
+.NB-feed-story .NB-feed-story-content li > ol {
+    margin: 3px 0 0;
+}
+
+/* Tables scroll inside the measure instead of stretching it. display:block on
+   the table is the only wrapper-free way to get that overflow. */
+.NB-feed-story .NB-feed-story-content table {
+    display: block;
+    max-width: 100%;
+    margin: var(--nb-space-4) 0;
+    overflow-x: auto;
+    border-collapse: collapse;
+    font-size: 0.95em;
+}
+
+.NB-feed-story .NB-feed-story-content th,
+.NB-feed-story .NB-feed-story-content td {
+    padding: 8px 12px;
+    border: 1px solid var(--nb-border);
+    text-align: start;
+    vertical-align: top;
+}
+
+.NB-feed-story .NB-feed-story-content th {
+    background-color: var(--nb-surface-2);
+    color: var(--nb-text);
+    font-weight: var(--nb-fw-semibold);
+}
+
+.NB-feed-story .NB-feed-story-content figure {
+    margin: var(--nb-space-4) 0;
+}
+
+.NB-feed-story .NB-feed-story-content figcaption {
+    margin-top: var(--nb-space-2);
+    color: var(--nb-meta);
+    font-size: var(--nb-fs-2);
+    line-height: var(--nb-lh-normal);
+}
+
+.NB-feed-story .NB-feed-story-content hr {
+    height: 0;
+    margin: var(--nb-space-5) 0;
+    border: 0;
+    border-top: 1px solid var(--nb-border);
+    background-color: transparent;
+}
+
+@media (max-width: 620px) {
+    .NB-feed-story .NB-feed-story-content h1 {
+        font-size: 22px;
+    }
+
+    .NB-feed-story .NB-feed-story-content h2 {
+        font-size: 19px;
+    }
+
+    .NB-feed-story .NB-feed-story-content h3 {
+        font-size: 16.5px;
+    }
+
+    .NB-feed-story .NB-feed-story-content pre {
+        padding: var(--nb-space-3);
+        font-size: var(--nb-fs-2);
+    }
+
+    .NB-feed-story .NB-feed-story-content th,
+    .NB-feed-story .NB-feed-story-content td {
+        padding: 6px 8px;
+    }
+}
+
+/* ==========================================================================
+   40. Phone header and bottom sheet
+   --------------------------------------------------------------------------
+   Below 768px the header keeps four controls: the drawer toggle, the feed
+   title, search, and the more button. Refresh, the view modes, the layout
+   switch, translate and the style pill all move into the sheet behind the more
+   button, where each one gets a 48px row instead of a 32px icon in a row that
+   has no space left. Above 768px nothing changes: the toolbar still shows every
+   control inline.
+   ========================================================================== */
+
+.NB-toolbar-actions .NB-toolbar-more {
+    order: 7;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: 0;
+    border-radius: var(--nb-radius-sm);
+    background-color: transparent;
+    color: var(--nb-text-2);
+    cursor: pointer;
+}
+
+.NB-toolbar-actions .NB-toolbar-more:hover,
+.NB-toolbar-actions .NB-toolbar-more.NB-active {
+    background-color: var(--nb-hover);
+    color: var(--nb-text);
+}
+
+.NB-toolbar-more-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+}
+
+/* Only the phone header shows the cancel affordance: on a desktop the field
+   closes on Escape or on a click anywhere else. */
+.NB-toolbar-search-cancel {
+    display: none;
+    flex: 0 0 auto;
+    align-items: center;
+    height: 100%;
+    padding: 0 var(--nb-space-1);
+    border: 0;
+    background: transparent;
+    font-family: var(--nb-font);
+    font-size: var(--nb-fs-2);
+    color: var(--nb-accent);
+    cursor: pointer;
+}
+
+@media (max-width: 768px) {
+
+    /* One row, four controls. */
+    #story_taskbar .NB-toolbar-refresh,
+    #story_taskbar .NB-toolbar-translate,
+    #story_taskbar .NB-taskbar-options-container,
+    #story_taskbar .NB-toolbar-layout-toggle {
+        display: none !important;
+    }
+
+    .NB-toolbar-actions .NB-toolbar-more {
+        display: inline-flex;
+        order: 6;
+    }
+
+    .NB-feedbar .NB-toolbar-sidebar-toggle,
+    .NB-feedbar .NB-toolbar-search,
+    .NB-feedbar .NB-toolbar-more {
+        width: 44px;
+        height: 44px;
+        border-radius: var(--nb-radius-md);
+    }
+
+    .NB-feedbar .NB-toolbar-search {
+        order: 5;
+        justify-content: center;
+        padding: 0;
+    }
+
+    .NB-feedbar .NB-toolbar-search:hover {
+        background-color: transparent;
+    }
+
+    .NB-feedbar .NB-toolbar-search-icon {
+        width: 18px;
+        height: 18px;
+        background-size: 18px;
+        opacity: .7;
+    }
+
+    /* The field only exists in search-open mode; resting, the pill is a button. */
+    .NB-feedbar .NB-toolbar-search .NB-toolbar-search-input {
+        display: none;
+    }
+
+    /* A running search keeps the results, and the story list keeps its own
+       "clear search" link, so the pill does not have to stay 220px wide and
+       squeeze the title on a phone. */
+    .NB-feedbar.NB-search-active .NB-toolbar-search {
+        width: 44px;
+        padding: 0;
+        justify-content: center;
+        background-color: transparent;
+    }
+
+    .NB-feedbar.NB-search-active .NB-toolbar-search .NB-toolbar-search-input {
+        display: none;
+    }
+
+    /* Search takes the whole row: the drawer toggle, the title and the more
+       button step aside until the field closes. */
+    .NB-feedbar.NB-search-open {
+        gap: var(--nb-space-1);
+        padding-inline: var(--nb-space-2);
+    }
+
+    .NB-feedbar.NB-search-open .NB-toolbar-sidebar-toggle,
+    .NB-feedbar.NB-search-open .NB-story-titles-header,
+    .NB-feedbar.NB-search-open .NB-toolbar-more {
+        display: none !important;
+    }
+
+    .NB-feedbar.NB-search-open .NB-toolbar-search {
+        order: 0;
+        flex: 1 1 auto;
+        width: auto;
+        height: 44px;
+        justify-content: flex-start;
+        gap: var(--nb-space-2);
+        padding: 0 var(--nb-space-2) 0 var(--nb-space-3);
+        background-color: var(--nb-surface-2);
+        border-color: var(--nb-accent);
+    }
+
+    /* The field is always focused while it is open, so the UA ring just draws
+       a second, brighter rectangle inside the pill. */
+    .NB-feedbar.NB-search-open .NB-toolbar-search .NB-toolbar-search-input:focus {
+        outline: none;
+    }
+
+    .NB-feedbar.NB-search-open .NB-toolbar-search .NB-toolbar-search-input {
+        display: block;
+        flex: 1 1 auto;
+        width: auto;
+        opacity: 1;
+        /* 16px keeps iOS from zooming the page when the field takes focus. */
+        font-size: 16px;
+    }
+
+    .NB-feedbar.NB-search-open .NB-toolbar-search-cancel {
+        display: inline-flex;
+    }
+
+    /* The two controls that share the title row grow to a thumb-sized target
+       without taking more width than they did as 20px icons. */
+    .NB-feedbar .NB-story-titles-header .NB-feedlist-manage-icon {
+        width: 40px;
+        height: 44px;
+        background-position: center center;
+        background-repeat: no-repeat;
+    }
+
+    .NB-feedbar .NB-story-titles-header .NB-feedbar-options {
+        min-height: 32px;
+        font-size: var(--nb-fs-1);
+    }
+
+    /* Marking the whole feed read is a sheet action now; the icon used to eat
+       the 42px the feed title needs to stay recognizable. */
+    .NB-feedbar .NB-feedbar-mark-feed-read {
+        display: none !important;
+    }
+}
+
+/* --- The sheet ----------------------------------------------------------- */
+
+.NB-sheet {
+    position: fixed;
+    inset: 0;
+    z-index: 1200;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+}
+
+.NB-sheet[hidden] {
+    display: none;
+}
+
+.NB-sheet-scrim {
+    position: absolute;
+    inset: 0;
+    background-color: rgba(16, 24, 40, .44);
+    opacity: 0;
+    transition: opacity var(--nb-dur) var(--nb-ease);
+}
+
+.NB-sheet-panel {
+    position: relative;
+    box-sizing: border-box;
+    width: 100%;
+    max-width: 560px;
+    max-height: 82vh;
+    overflow-y: auto;
+    padding: var(--nb-space-2) var(--nb-space-4) calc(var(--nb-space-4) + env(safe-area-inset-bottom, 0px));
+    border-radius: var(--nb-radius-xl) var(--nb-radius-xl) 0 0;
+    background-color: var(--nb-surface);
+    box-shadow: var(--nb-shadow-lg);
+    outline: none;
+    transform: translateY(100%);
+    transition: transform var(--nb-dur) var(--nb-ease);
+}
+
+.NB-sheet-visible .NB-sheet-scrim {
+    opacity: 1;
+}
+
+.NB-sheet-visible .NB-sheet-panel {
+    transform: translateY(0);
+}
+
+body.NB-sheet-open {
+    overflow: hidden;
+}
+
+.NB-sheet-handle {
+    width: 36px;
+    height: 4px;
+    margin: 0 auto var(--nb-space-3);
+    border-radius: 2px;
+    background-color: var(--nb-border);
+}
+
+.NB-sheet-group {
+    margin-bottom: var(--nb-space-4);
+}
+
+.NB-sheet-group-title {
+    margin-bottom: var(--nb-space-2);
+    font-size: var(--nb-fs-1);
+    font-weight: 600;
+    color: var(--nb-meta);
+}
+
+.NB-sheet-segment {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: 1fr;
+    gap: 4px;
+    padding: 4px;
+    border-radius: var(--nb-radius-md);
+    background-color: var(--nb-surface-2);
+}
+
+.NB-sheet-segment button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 40px;
+    padding: 0 var(--nb-space-2);
+    border: 0;
+    border-radius: var(--nb-radius-sm);
+    background-color: transparent;
+    font-family: var(--nb-font);
+    font-size: var(--nb-fs-2);
+    color: var(--nb-text-2);
+    cursor: pointer;
+}
+
+.NB-sheet-segment button.NB-active {
+    background-color: var(--nb-surface);
+    box-shadow: var(--nb-shadow-sm);
+    color: var(--nb-text);
+    font-weight: 600;
+}
+
+.NB-sheet-rows {
+    display: flex;
+    flex-direction: column;
+    margin-bottom: var(--nb-space-3);
+}
+
+.NB-sheet-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--nb-space-2);
+    min-height: 52px;
+    padding: 0 var(--nb-space-1);
+    border: 0;
+    border-top: 1px solid var(--nb-border);
+    background-color: transparent;
+    font-family: var(--nb-font);
+    font-size: var(--nb-fs-3);
+    color: var(--nb-text);
+    text-align: start;
+    cursor: pointer;
+}
+
+.NB-sheet-row:first-child {
+    border-top: 0;
+}
+
+.NB-sheet-row:active {
+    background-color: var(--nb-hover);
+}
+
+.NB-sheet-row-state {
+    flex: 0 0 auto;
+    color: var(--nb-accent);
+}
+
+.NB-sheet-row[aria-pressed="true"] .NB-sheet-row-state::after {
+    content: "✓";
+}
+
+.NB-sheet-row-hidden {
+    display: none !important;
+}
+
+.NB-sheet-cancel {
+    display: block;
+    width: 100%;
+    min-height: 48px;
+    border: 0;
+    border-radius: var(--nb-radius-md);
+    background-color: var(--nb-surface-2);
+    font-family: var(--nb-font);
+    font-size: var(--nb-fs-3);
+    color: var(--nb-text);
+    cursor: pointer;
+}
+
+/* A phone renders full and split as list (see assetmodel.view_setting), so the
+   two options would be no-ops at this width. */
+@media (max-width: 620px) {
+    .NB-sheet [data-sheet-layout="full"],
+    .NB-sheet [data-sheet-layout="split"] {
+        display: none;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .NB-sheet-panel,
+    .NB-sheet-scrim {
+        transition: none;
+    }
+}

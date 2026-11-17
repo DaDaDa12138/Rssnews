@@ -1,0 +1,34 @@
+{% extends 'base_static.html' %}
+{% load i18n %}
+
+{% load utils_tags %}
+
+{% block bodyclass %}NB-static NB-static-email-optout{% endblock %}
+{% block title %}{% trans "Email Settings - NewsBlur" %}{% endblock %}
+
+{% block content %}
+
+<div class="NB-static-card-wrapper">
+    <div class="NB-static-card">
+        <a href="{% url "index" %}" class="NB-static-card-logo">
+            <img src="{{ MEDIA_URL }}img/logo_512.png" alt="" />
+        </a>
+
+        {% if unsubscribed %}
+            <h1 class="NB-static-card-title">{% trans "Unsubscribed" %}</h1>
+            <p class="NB-static-card-copy">{% trans "You will no longer receive any emails from NewsBlur." %}</p>
+            <a href="{% url "index" %}?next=optout" class="NB-static-card-altlink">{% trans "Changed your mind? Manage your email settings" %} &raquo;</a>
+            <a href="{% url "index" %}" class="NB-static-card-altlink">{% trans "Continue to NewsBlur" %} &raquo;</a>
+        {% else %}
+            <h1 class="NB-static-card-title">{% trans "Unsubscribe from NewsBlur emails" %}</h1>
+            <p class="NB-static-card-copy">{% blocktrans trimmed with email=user.email username=user.username %}Stop sending all NewsBlur emails to <b>{{ email }}</b> for the account <b>{{ username }}</b>?{% endblocktrans %}</p>
+            <form method="post">
+                {% csrf_token %}
+                <button type="submit" class="NB-static-card-submit NB-unsubscribe-button">{% trans "Unsubscribe" %}</button>
+            </form>
+            <a href="{% url "index" %}" class="NB-static-card-altlink">{% trans "No thanks, keep my emails and continue to NewsBlur" %} &raquo;</a>
+        {% endif %}
+    </div>
+</div>
+
+{% endblock %}

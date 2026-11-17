@@ -1,0 +1,111 @@
+/* Standalone shell for /offline/. It is precached by the service worker, so it
+   must not depend on the reader bundles, web fonts, or any network request. */
+:root {
+  color-scheme: light dark;
+  --nb-offline-bg: #f7f8fa;
+  --nb-offline-card: #ffffff;
+  --nb-offline-text: #20242a;
+  --nb-offline-muted: #5f6672;
+  --nb-offline-border: #dfe3ea;
+  --nb-offline-accent: #c77a22;
+  --nb-offline-accent-text: #ffffff;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --nb-offline-bg: #171a1f;
+    --nb-offline-card: #20242b;
+    --nb-offline-text: #eef1f5;
+    --nb-offline-muted: #a8b0bd;
+    --nb-offline-border: #343a44;
+    --nb-offline-accent: #e0a45a;
+    --nb-offline-accent-text: #21180c;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--nb-offline-bg);
+  color: var(--nb-offline-text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial,
+    "Noto Sans", sans-serif;
+  line-height: 1.5;
+}
+
+.NB-offline {
+  width: min(100%, 420px);
+  padding: 40px 32px;
+  text-align: center;
+  background: var(--nb-offline-card);
+  border: 1px solid var(--nb-offline-border);
+  border-radius: 18px;
+  box-shadow: 0 18px 50px rgb(20 24 32 / 10%);
+}
+
+.NB-offline-icon {
+  width: 88px;
+  height: 88px;
+  display: block;
+  margin: 0 auto 20px;
+  border-radius: 20px;
+}
+
+.NB-offline-kicker {
+  margin: 0 0 8px;
+  color: var(--nb-offline-muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.NB-offline h1 {
+  margin: 0 0 12px;
+  font-size: 28px;
+  line-height: 1.2;
+}
+
+.NB-offline p {
+  margin: 0 0 24px;
+  color: var(--nb-offline-muted);
+  font-size: 15px;
+}
+
+.NB-offline-button {
+  display: inline-block;
+  padding: 11px 20px;
+  color: var(--nb-offline-accent-text);
+  background: var(--nb-offline-accent);
+  border-radius: 999px;
+  font-size: 15px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.NB-offline-button:focus-visible {
+  outline: 3px solid var(--nb-offline-text);
+  outline-offset: 3px;
+}
+
+@media (max-width: 420px) {
+  .NB-offline {
+    padding: 32px 22px;
+  }
+
+  .NB-offline h1 {
+    font-size: 24px;
+  }
+}

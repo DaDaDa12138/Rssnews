@@ -1,0 +1,45 @@
+{% extends 'base_static.html' %}
+{% load i18n %}
+
+{% load utils_tags %}
+
+{% block bodyclass %}NB-static NB-static-delete-account{% endblock %}
+{% block title %}{% trans "Delete Account - NewsBlur" %}{% endblock %}
+
+{% block content %}
+
+<div class="NB-static-card-wrapper">
+    <div class="NB-static-card NB-delete-card">
+        <a href="{% url "index" %}" class="NB-static-card-logo">
+            <img src="{{ MEDIA_URL }}img/logo_512.png" alt="" />
+        </a>
+        <h1 class="NB-static-card-title">{% trans "Delete Account" %}</h1>
+        <p class="NB-static-card-copy">{% trans "This permanently deletes your account, subscriptions, and saved stories. This cannot be undone." %}</p>
+
+        <form action="" method="POST">{% csrf_token %}
+            {% if delete_form.errors %}
+                <div class="NB-static-card-error">
+                    {% for field, error in delete_form.errors.items %}
+                        {{ error.as_text|cut:"* " }}
+                    {% endfor %}
+                </div>
+            {% endif %}
+
+            <div class="NB-static-card-field">
+                <label for="{{ delete_form.password.id_for_label }}" class="NB-static-card-label">{{ delete_form.password.label }}</label>
+                {{ delete_form.password }}
+            </div>
+
+            <div class="NB-static-card-field">
+                <label for="{{ delete_form.confirm.id_for_label }}" class="NB-static-card-label">{{ delete_form.confirm.label }}</label>
+                {{ delete_form.confirm }}
+            </div>
+
+            <button type="submit" class="NB-static-card-submit NB-delete-submit">{% trans "Permanently delete my account" %}</button>
+        </form>
+
+        <a href="{% url "index" %}" class="NB-static-card-altlink">{% trans "Cancel" %}</a>
+    </div>
+</div>
+
+{% endblock %}

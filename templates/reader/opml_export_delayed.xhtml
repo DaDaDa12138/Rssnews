@@ -1,0 +1,25 @@
+{% extends 'base_static.html' %}
+{% load i18n %}
+
+{% load utils_tags %}
+
+{% block bodyclass %}NB-static NB-static-opml-export{% endblock %}
+{% block title %}{% trans "Your OPML export is being processed" %}{% endblock %}
+
+{% block content %}
+
+<div class="NB-static-card-wrapper">
+    <div class="NB-static-card">
+        <a href="{% url "index" %}" class="NB-static-card-logo">
+            <img src="{{ MEDIA_URL }}img/logo_512.png" alt="" />
+        </a>
+
+        <h1 class="NB-static-card-title">{% trans "Your OPML export is being processed" %}</h1>
+        <p class="NB-static-card-copy">{% trans "You have a lot of subscriptions! We're preparing your OPML export file now." %}</p>
+        <p class="NB-static-card-copy"><strong>{% trans "You will receive an email shortly with your subscription backup attached." %}</strong></p>
+        <p class="NB-static-card-copy">{% trans "The email will be sent to:" %} <strong>{{ user.email }}</strong></p>
+        <a href="{% url "index" %}" class="NB-static-card-altlink">{% trans "Return to NewsBlur" %} &raquo;</a>
+    </div>
+</div>
+
+{% endblock %}

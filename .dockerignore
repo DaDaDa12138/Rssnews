@@ -1,0 +1,23 @@
+.git
+.gitignore
+venv/
+.vscode
+__pycache__
+*.pyc
+docker/volumes
+backups
+legacy
+static
+node_modules
+# Runtime state: celery's scheduler database and the log directory grow while the
+# container runs, so they have no business in a build context.
+celerybeat-schedule*
+logs
+.prom_cache
+media/img
+media/blog
+media/extensions
+media/fonts
+media/flash
+media/safari
+media/templates

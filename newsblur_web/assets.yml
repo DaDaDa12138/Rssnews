@@ -1,0 +1,116 @@
+# Asset pipeline configuration (django-pipeline)
+# Only the javascripts and stylesheets sections are read here. The compressors
+# and output paths live in newsblur_web/settings.py.
+
+javascripts:
+  # Vendor and application code ship as two bundles so a deploy that only touches
+  # NewsBlur code keeps the (large, rarely changing) vendor bundle in the browser
+  # cache. Load order is unchanged: templates include common_vendor first.
+  common_vendor:
+    - js/vendor/jquery-3.7.1.min.js
+    - js/vendor/jquery.browser.js
+    - js/vendor/jquery.easing.js
+    - js/vendor/jquery.newsblur.js
+    - js/vendor/jquery.scrollTo.js
+    - js/vendor/jquery.ajaxmanager.3.js
+    - js/vendor/jquery.corners.js
+    - js/vendor/jquery.hotkeys.js
+    - js/vendor/jquery.simplemodal-1.4.js
+    - js/vendor/jquery.color.js
+    - js/vendor/jquery.wakeup.js
+    - js/vendor/jquery-ui-1.13.1.js
+    - js/vendor/jquery.cookie.js
+    - js/vendor/jquery.tipsy.js
+    - js/vendor/tippy-*.js
+    - js/vendor/jquery.autosize.js
+    - js/vendor/tag-it.js
+    - js/vendor/chart.js
+    - js/vendor/inflector.js
+    - js/vendor/underscore-*.js
+    - js/vendor/underscore.string.js
+    - js/vendor/backbone-*.js
+    - js/vendor/highlight.js
+    - js/vendor/fitvid.js
+    - js/vendor/imagesLoaded-4.1.4.js
+    - js/vendor/mark.js
+    - js/vendor/global-exports.js
+  # Account pages (login, signup, password reset, welcome, account deletion)
+  # only need the theme toggle. Shipping the reader bundle there cost 1.4 MB
+  # of JS for one button.
+  static_js:
+    - js/build/modules.js
+    - js/newsblur/common/theme_toggle.js
+  common:
+    - js/newsblur/reader/reader_utils.js
+    - js/newsblur/reader/reader.js
+    - js/newsblur/reader/reader_popover.js
+    # ES modules bundled by utils/build_modules.py (window.NEWSBLUR_MODULES).
+    # Loads before the legacy scripts that read it.
+    - js/build/modules.js
+    - js/newsblur/common/*.js
+    - js/newsblur/models/stories.js
+    - js/newsblur/models/*.js
+    - js/newsblur/views/*.js
+    - js/newsblur/reader/*.js
+  statistics:
+    - js/vendor/jquery-3.7.1.min.js
+    - js/vendor/jquery.newsblur.js
+    - js/vendor/inflector.js
+    - js/vendor/underscore-*.js
+    - js/vendor/underscore.string.js
+    - js/vendor/backbone-*.js
+    - js/vendor/chart.js
+    - js/newsblur/common/modal.js
+    - js/newsblur/reader/reader_statistics.js
+    - js/newsblur/reader/reader_utils.js
+    - js/newsblur/models/feeds.js
+
+stylesheets:
+  common:
+    # The two legacy sheets are split by surface. Load order is the numeric prefix
+    # order, so the split changes no cascade: concatenated in sequence they
+    # reproduce the original reader.css and darkmode.css byte for byte. Add rules
+    # to the part that owns the surface; a new file needs a prefix that keeps it
+    # where it belongs, or the cascade shifts.
+    - css/reader/core/01-base.css
+    - css/reader/core/02-feed-list.css
+    - css/reader/core/03-story-titles.css
+    - css/reader/core/04-story-content.css
+    - css/reader/core/05-sideoptions.css
+    - css/reader/core/06-headers.css
+    - css/reader/core/07-panes.css
+    - css/reader/core/08-classifier.css
+    - css/reader/core/09-manage.css
+    - css/reader/core/10-modules.css
+    - css/reader/core/11-menus.css
+    - css/reader/core/13-modals.css
+    - css/reader/core/14-static-pages.css
+    - css/reader/core/15-popovers.css
+    - css/reader/splash.css
+    - css/controls/*.css
+    - css/reader/modals.css
+    - css/reader/status.css
+    - css/reader/dark/01-base.css
+    - css/reader/dark/02-panes.css
+    - css/reader/dark/04-modals.css
+    - css/reader/language.css
+    - css/jquery-ui/jquery-ui.theme.css
+    - css/jquery-ui/jquery-ui.structure.css
+    - css/vendor/jquery.tagit.css
+    - css/reader/grid.css
+    - css/reader/tokens.css
+    - css/reader/modern.css
+  # Account pages (login, signup, welcome, password reset, account deletion) never
+  # render the reader shell. They only need the base reset, the splash footer, the
+  # static card rules, and the modal button styles, so they skip the ~600 KB reader bundle.
+  static:
+    - css/reader/tokens.css
+    - css/reader/core/01-base.css
+    - css/reader/core/07-panes.css
+    - css/reader/core/14-static-pages.css
+    - css/reader/modals.css
+    - css/reader/static-shell.css
+  # assets.yml: right-to-left pages (Arabic, Hebrew) link a mirrored copy of common or blurblog built at
+  # runtime by utils/rtl_css.py, then these hand-written overrides right after it.
+  rtl:
+    - css/reader/reader_rtl.css

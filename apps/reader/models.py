@@ -1,0 +1,3663 @@
+"""Reader models: UserSubscription, UserSubscriptionFolders, and starred/read story tracking.
+
+UserSubscription links a user to a feed with per-user unread counts and scores.
+UserSubscriptionFolders stores the user's folder hierarchy as nested JSON.
+Additional MongoDB models track read stories (RUserStory) and starred stories.
+"""
+
+import datetime
+import hashlib
+import heapq
+import re
+import time
+import uuid
+
+import redis
+from django.conf import settings
+from django.contrib.auth.models import User
+from django.core.cache import cache
+from django.db import DatabaseError, IntegrityError, models, transaction
+from django.db.models import Count, Q
+from django.template.defaultfilters import slugify
+from redis.exceptions import LockError
+
+from apps.analyzer.models import (
+    MClassifierAuthor,
+    MClassifierFeed,
+    MClassifierTag,
+    MClassifierText,
+    MClassifierTitle,
+    MClassifierUrl,
+    apply_classifier_authors,
+    apply_classifier_feeds,
+    apply_classifier_tags,
+    apply_classifier_texts,
+    apply_classifier_titles,
+    apply_classifier_urls,
+)
+from apps.reader.managers import UserSubscriptionManager
+from apps.reader.metrics import normalize_reader_metrics_read_filter, normalize_reader_metrics_source
+from apps.rss_feeds.models import DuplicateFeed, Feed, MStory, renew_merge_feeds_locks
+from apps.rss_feeds.tasks import NewFeeds
+from utils import json_functions as json
+from utils import log as logging
+from utils.feed_functions import add_object_to_folder, chunks
+from utils.documents import LegacyDocument
+from utils.folder_paths import InvalidFolderPath, resolve_folder_path
+
+# apps/reader/models.py: An archive backfill starts one feed's walk this many seconds apart, queuing
+# a batch at a time so no countdown waits anywhere near the broker's one hour visibility timeout
+# (dispatch_archive_backfill).
+ARCHIVE_BACKFILL_STAGGER_SECONDS = 10
+ARCHIVE_BACKFILL_BATCH_SIZE = 60
+# A backfill's state, its list of feeds, and the user's claim last this long past the last dispatch,
+# well beyond any delay a dispatch can see, so a slow backfill is never mistaken for an abandoned one.
+ARCHIVE_BACKFILL_STATE_SECONDS = 2 * 24 * 60 * 60
+# The finish checks this often for walks still going, this many times, before it runs anyway.
+ARCHIVE_BACKFILL_FINISH_RECHECK_SECONDS = 5 * 60
+ARCHIVE_BACKFILL_FINISH_MAX_RECHECKS = 12
+
+def unread_cutoff_default():
+    return datetime.datetime.utcnow() - datetime.timedelta(days=settings.DAYS_OF_UNREAD)
+
+class UserSubscription(models.Model):
+    """
+    A feed which a user has subscribed to. Carries all of the cached information
+    about the subscription, including unread counts of the three primary scores.
+
+    Also has a dirty flag (needs_unread_recalc) which means that the unread counts
+    are not accurate and need to be calculated with `self.calculate_feed_scores()`.
+    """
+
+    user = models.ForeignKey(User, related_name="subscriptions", on_delete=models.CASCADE)
+    feed = models.ForeignKey(Feed, related_name="subscribers", on_delete=models.CASCADE)
+    user_title = models.CharField(max_length=255, null=True, blank=True)
+    active = models.BooleanField(default=False)
+    last_read_date = models.DateTimeField(default=unread_cutoff_default)
+    mark_read_date = models.DateTimeField(default=unread_cutoff_default)
+    unread_count_neutral = models.IntegerField(default=0)
+    unread_count_positive = models.IntegerField(default=0)
+    unread_count_negative = models.IntegerField(default=0)
+    unread_count_updated = models.DateTimeField(default=datetime.datetime.now)
+    oldest_unread_story_date = models.DateTimeField(default=datetime.datetime.now)
+    needs_unread_recalc = models.BooleanField(default=False)
+    feed_opens = models.IntegerField(default=0)
+    is_trained = models.BooleanField(default=False)
+    auto_mark_read_days = models.IntegerField(null=True, blank=True, default=None)
+    # None = inherit from folder/site-wide
+    # 0 = never auto-mark (explicit override to disable aging)
+    # 1-365 = days until auto-mark
+    mute_expires_at = models.DateTimeField(null=True, blank=True, default=None)
+    # None = permanent mute (or not muted if active=True)
+    # datetime = auto-unmute after this time
+
+    objects = UserSubscriptionManager()
+
+    def __str__(self):
+        return "[%s (%s): %s (%s)] " % (self.user.username, self.user.pk, self.feed.feed_title, self.feed.pk)
+
+    class Meta:
+        unique_together = ("user", "feed")
+
+    def canonical(self, full=False, include_favicon=True, classifiers=None):
+        feed = self.feed.canonical(full=full, include_favicon=include_favicon)
+        feed["feed_title"] = self.user_title or feed["feed_title"]
+        feed["ps"] = self.unread_count_positive
+        feed["nt"] = self.unread_count_neutral
+        feed["ng"] = self.unread_count_negative
+        feed["active"] = self.active
+        feed["feed_opens"] = self.feed_opens
+        feed["subscribed"] = True
+        if self.auto_mark_read_days is not None:
+            feed["auto_mark_read_days"] = self.auto_mark_read_days
+        if self.mute_expires_at is not None:
+            feed["mute_expires_at"] = self.mute_expires_at.isoformat()
+        if classifiers:
+            feed["classifiers"] = classifiers
+
+        return feed
+
+    def save(self, *args, **kwargs):
+        user_title_max = self._meta.get_field("user_title").max_length
+        if self.user_title and len(self.user_title) > user_title_max:
+            self.user_title = self.user_title[:user_title_max]
+        try:
+            with transaction.atomic():
+                super(UserSubscription, self).save(*args, **kwargs)
+        except IntegrityError:
+            duplicate_feeds = DuplicateFeed.objects.filter(duplicate_feed_id=self.feed_id)
+            for duplicate_feed in duplicate_feeds:
+                already_subscribed = UserSubscription.objects.filter(user=self.user, feed=duplicate_feed.feed)
+                if not already_subscribed:
+                    self.feed = duplicate_feed.feed
+                    super(UserSubscription, self).save(*args, **kwargs)
+                    break
+            else:
+                if self and self.id:
+                    self.delete()
+
+    @classmethod
+    def subs_for_feeds(cls, user_id, feed_ids=None, read_filter="unread"):
+        usersubs = cls.objects
+        if read_filter == "unread":
+            usersubs = usersubs.filter(Q(unread_count_neutral__gt=0) | Q(unread_count_positive__gt=0))
+        if not feed_ids:
+            usersubs = usersubs.filter(user=user_id, active=True).only(
+                "user",
+                "feed",
+                "mark_read_date",
+                "is_trained",
+                "needs_unread_recalc",
+                "auto_mark_read_days",
+                "unread_count_neutral",
+                "unread_count_positive",
+            )
+        else:
+            usersubs = usersubs.filter(user=user_id, active=True, feed__in=feed_ids).only(
+                "user",
+                "feed",
+                "mark_read_date",
+                "is_trained",
+                "needs_unread_recalc",
+                "auto_mark_read_days",
+                "unread_count_neutral",
+                "unread_count_positive",
+            )
+
+        return usersubs
+
+    @classmethod
+    def story_hashes(
+        cls,
+        user_id,
+        feed_ids=None,
+        usersubs=None,
+        read_filter="unread",
+        order="newest",
+        include_timestamps=False,
+        group_by_feed=False,
+        cutoff_date=None,
+        date_filter_start=None,
+        date_filter_end=None,
+        across_all_feeds=True,
+        store_stories_key=None,
+        offset=0,
+        limit=500,
+        metrics_source="other",
+    ):
+        metrics_source = normalize_reader_metrics_source(metrics_source)
+        metrics_read_filter = normalize_reader_metrics_read_filter(read_filter)
+        story_hashes_start = time.time()
+        r = redis.Redis(connection_pool=settings.REDIS_STORY_HASH_POOL)
+        pipeline = r.pipeline()
+        user = User.objects.get(pk=user_id)
+        story_hashes = {} if group_by_feed else []
+
+        if not feed_ids and not across_all_feeds:
+            return story_hashes
+
+        if not usersubs:
+            usersubs = cls.subs_for_feeds(user_id, feed_ids=feed_ids, read_filter=read_filter)
+            if not usersubs:
+                usersubs = cls.subs_for_feeds(user_id, feed_ids=feed_ids, read_filter="all")
+            feed_ids = [sub.feed_id for sub in usersubs]
+            if not feed_ids:
+                return story_hashes
+        elif read_filter == "unread":
+            usersubs = [
+                sub
+                for sub in usersubs
+                if sub.needs_unread_recalc or sub.unread_count_neutral > 0 or sub.unread_count_positive > 0
+            ]
+            feed_ids = [sub.feed_id for sub in usersubs]
+            if not feed_ids:
+                return story_hashes
+
+        current_time = int(time.time() + 60 * 60 * 24)
+        if not cutoff_date:
+            cutoff_date = user.profile.unread_cutoff
+        feed_counter = 0
+        unread_ranked_stories_keys = []
+
+        read_dates = dict()
+        needs_unread_recalc = dict()
+        unread_cache_state_counts = {
+            "cached": 0,
+            "dirty": 0,
+            "missing": 0,
+            "dirty_missing": 0,
+        }
+        manual_unread_pipeline = r.pipeline()
+        manual_unread_feed_oldest_date = dict()
+        oldest_manual_unread = None
+
+        # usersub_count = len(usersubs)
+        for us in usersubs:
+            # Calculate effective cutoff for this feed based on auto_mark_read settings
+            read_dates[us.feed_id] = int(max(us.mark_read_date, cutoff_date).strftime("%s"))
+            if read_filter == "unread":
+                needs_unread_recalc[us.feed_id] = us.needs_unread_recalc  # or usersub_count == 1
+                user_manual_unread_stories_feed_key = f"uU:{user_id}:{us.feed_id}"
+                manual_unread_pipeline.exists(user_manual_unread_stories_feed_key)
+                user_unread_ranked_stories_key = f"zU:{user_id}:{us.feed_id}"
+                manual_unread_pipeline.exists(user_unread_ranked_stories_key)
+        if read_filter == "unread":
+            results = manual_unread_pipeline.execute()
+            for i, us in enumerate(usersubs):
+                cache_exists = bool(results[i * 2 + 1])
+                cache_dirty = bool(us.needs_unread_recalc)
+                if results[i * 2]:  # user_manual_unread_stories_feed_key
+                    user_manual_unread_stories_feed_key = f"uU:{user_id}:{us.feed_id}"
+                    oldest_manual_unread = r.zrevrange(
+                        user_manual_unread_stories_feed_key, -1, -1, withscores=True
+                    )
+                    manual_unread_feed_oldest_date[us.feed_id] = int(oldest_manual_unread[0][1])
+                if cache_dirty and cache_exists:
+                    unread_cache_state_counts["dirty"] += 1
+                elif cache_dirty and not cache_exists:
+                    unread_cache_state_counts["dirty_missing"] += 1
+                elif not cache_exists:
+                    unread_cache_state_counts["missing"] += 1
+                else:
+                    unread_cache_state_counts["cached"] += 1
+
+                if not cache_exists:
+                    needs_unread_recalc[us.feed_id] = True
+
+        for feed_id_group in chunks(feed_ids, 50):
+            pipeline = r.pipeline()
+            for feed_id in feed_id_group:
+                sorted_stories_key = "zF:%s" % feed_id
+                read_stories_key = "RS:%s:%s" % (user_id, feed_id)
+                unread_ranked_stories_key = "zU:%s:%s" % (user_id, feed_id)
+                user_manual_unread_stories_feed_key = f"uU:{user_id}:{feed_id}"
+
+                max_score = current_time
+                if read_filter == "unread":
+                    min_score = read_dates[feed_id]
+                    # if needs_unread_recalc[feed_id]:
+                    #     pipeline.sdiffstore(unread_stories_key, stories_key, read_stories_key)
+                    #     # pipeline.expire(unread_stories_key, unread_cutoff_diff.days*24*60*60)
+                    #     pipeline.expire(unread_stories_key, 1*60*60) # 1 hour
+                else:
+                    min_score = 0
+
+                if order == "oldest":
+                    byscorefunc = pipeline.zrangebyscore
+                else:
+                    byscorefunc = pipeline.zrevrangebyscore
+                    min_score, max_score = max_score, min_score
+
+                ranked_stories_key = unread_ranked_stories_key
+                if read_filter == "unread":
+                    if needs_unread_recalc[feed_id]:
+                        pipeline.zdiffstore(unread_ranked_stories_key, [sorted_stories_key, read_stories_key])
+                        # pipeline.expire(unread_ranked_stories_key, unread_cutoff_diff.days*24*60*60)
+                        pipeline.expire(unread_ranked_stories_key, 1 * 60 * 60)  # 1 hours
+                    # Always apply score filtering to ensure per-feed auto_mark_read cutoffs are enforced
+                    # even when reading from existing cache. This is safe because zremrangebyscore is idempotent.
+                    if order == "oldest":
+                        pipeline.zremrangebyscore(ranked_stories_key, 0, min_score - 1)
+                        pipeline.zremrangebyscore(ranked_stories_key, max_score + 1, 2 * max_score)
+                    else:
+                        pipeline.zremrangebyscore(ranked_stories_key, 0, max_score - 1)
+                        pipeline.zremrangebyscore(ranked_stories_key, min_score + 1, 2 * min_score)
+                else:
+                    ranked_stories_key = sorted_stories_key
+
+                # If there's a date filter, we need to filter the stories by date
+                if date_filter_start or date_filter_end:
+                    logging.debug(f"Applying date filter: {date_filter_start} - {date_filter_end}")
+                    # Create temp key for date filtering when using persistent sorted_stories_key
+                    # to avoid corrupting the shared feed data for all users
+                    if read_filter != "unread":
+                        temp_ranked_stories_key = f"zT:{user_id}:{feed_id}"
+                        pipeline.zunionstore(temp_ranked_stories_key, [ranked_stories_key])
+                        pipeline.expire(temp_ranked_stories_key, 1 * 60 * 60)  # 1 hour
+                        ranked_stories_key = temp_ranked_stories_key
+
+                    # Remove stories outside the date range from temp copy
+                    if date_filter_start:
+                        start_score = int(date_filter_start.replace(tzinfo=datetime.timezone.utc).timestamp())
+                        pipeline.zremrangebyscore(ranked_stories_key, "-inf", start_score - 1)
+
+                    if date_filter_end:
+                        end_score = int(date_filter_end.replace(tzinfo=datetime.timezone.utc).timestamp())
+                        pipeline.zremrangebyscore(ranked_stories_key, end_score, "+inf")
+
+                    # After filtering, retrieve all remaining stories (don't filter by score again)
+                    min_score = "-inf"
+                    max_score = "+inf"
+                    if order != "oldest":
+                        min_score, max_score = max_score, min_score
+
+                if not store_stories_key:
+                    byscorefunc(
+                        ranked_stories_key,
+                        min_score,
+                        max_score,
+                        withscores=include_timestamps,
+                        start=offset,
+                        num=limit,
+                    )
+                unread_ranked_stories_keys.append(ranked_stories_key)
+
+            results = pipeline.execute()
+
+            if not store_stories_key:
+                for hashes in results:
+                    if not isinstance(hashes, list):
+                        continue
+                    if group_by_feed:
+                        story_hashes[feed_ids[feed_counter]] = hashes
+                        feed_counter += 1
+                    else:
+                        story_hashes.extend(hashes)
+
+        if not store_stories_key:
+            story_hashes_duration = time.time() - story_hashes_start
+            if read_filter == "unread" and usersubs:
+                rebuild_count = (
+                    unread_cache_state_counts["dirty"]
+                    + unread_cache_state_counts["missing"]
+                    + unread_cache_state_counts["dirty_missing"]
+                )
+                if rebuild_count >= 25 or story_hashes_duration >= 0.25:
+                    logging.info(
+                        "reader_story_hashes "
+                        f"source={metrics_source} read_filter={metrics_read_filter} "
+                        f"feeds={len(feed_ids or [])} rebuild={rebuild_count} "
+                        f"cached={unread_cache_state_counts['cached']} "
+                        f"dirty={unread_cache_state_counts['dirty']} "
+                        f"missing={unread_cache_state_counts['missing']} "
+                        f"dirty_missing={unread_cache_state_counts['dirty_missing']} "
+                        f"duration_ms={int(story_hashes_duration * 1000)}"
+                    )
+            return story_hashes
+
+        chunk_count = 0
+        chunk_size = 100  # Keep chunks small to reduce Redis blocking time per ZUNIONSTORE
+        if len(unread_ranked_stories_keys) < chunk_size:
+            r.zunionstore(store_stories_key, unread_ranked_stories_keys)
+        else:
+            pipeline = r.pipeline()
+            for unread_ranked_stories_keys_group in chunks(unread_ranked_stories_keys, chunk_size):
+                pipeline.zunionstore(
+                    f"{store_stories_key}-chunk{chunk_count}",
+                    unread_ranked_stories_keys_group,
+                    aggregate="MAX",
+                )
+                chunk_count += 1
+            pipeline.execute()
+            r.zunionstore(
+                store_stories_key,
+                [f"{store_stories_key}-chunk{i}" for i in range(chunk_count)],
+                aggregate="MAX",
+            )
+            pipeline = r.pipeline()
+            for i in range(chunk_count):
+                pipeline.delete(f"{store_stories_key}-chunk{i}")
+            pipeline.execute()
+
+    def get_stories(
+        self,
+        offset=0,
+        limit=6,
+        order="newest",
+        read_filter="all",
+        cutoff_date=None,
+        date_filter_start=None,
+        date_filter_end=None,
+        metrics_source="other",
+    ):
+        metrics_source = normalize_reader_metrics_source(metrics_source)
+        r = redis.Redis(connection_pool=settings.REDIS_STORY_HASH_POOL)
+        unread_ranked_stories_key = "zU:%s:%s" % (self.user_id, self.feed_id)
+        unread_page_cache_key = "zUP:%s:%s" % (self.user_id, self.feed_id)
+
+        def story_hash_cache_member(story_hash):
+            if isinstance(story_hash, bytes):
+                return story_hash.decode("utf-8")
+            return story_hash
+
+        def split_story_hash_scores(story_hashes):
+            hashes = []
+            scores = {}
+            for story_hash in story_hashes:
+                if isinstance(story_hash, (list, tuple)) and len(story_hash) == 2:
+                    story_hash, score = story_hash
+                    scores[story_hash_cache_member(story_hash)] = score
+                hashes.append(story_hash)
+            return hashes, scores
+
+        def cache_story_hash_scores(story_hashes, known_scores=None):
+            if not story_hashes:
+                return
+
+            known_scores = known_scores or {}
+            missing_story_hashes = [
+                story_hash
+                for story_hash in story_hashes
+                if story_hash_cache_member(story_hash) not in known_scores
+            ]
+            scores = []
+            if missing_story_hashes:
+                pipeline = r.pipeline()
+                for story_hash in missing_story_hashes:
+                    pipeline.zscore(unread_ranked_stories_key, story_hash)
+                scores = pipeline.execute()
+
+            cache_scores = {}
+            for story_hash in story_hashes:
+                score = known_scores.get(story_hash_cache_member(story_hash))
+                if score is not None:
+                    cache_scores[story_hash] = score
+            for story_hash, score in zip(missing_story_hashes, scores):
+                if score is not None:
+                    cache_scores[story_hash] = score
+
+            if cache_scores:
+                r.zadd(unread_page_cache_key, cache_scores)
+                r.expire(unread_page_cache_key, 1 * 60 * 60)
+
+        if read_filter == "unread" and offset and r.exists(unread_page_cache_key):
+            page_end = offset + limit
+            cached_count = r.zcard(unread_page_cache_key)
+
+            if cached_count < page_end:
+                cached_hashes = {story_hash_cache_member(h) for h in r.zrange(unread_page_cache_key, 0, -1)}
+                needed_count = page_end - cached_count
+                candidate_limit = page_end
+                candidate_hashes = []
+                candidate_scores = {}
+                byscorefunc = r.zrevrange
+                if order == "oldest":
+                    byscorefunc = r.zrange
+                unread_ranked_exists = r.exists(unread_ranked_stories_key)
+                while len(candidate_hashes) < candidate_limit:
+                    if unread_ranked_exists:
+                        candidate_rows = byscorefunc(
+                            unread_ranked_stories_key,
+                            start=0,
+                            end=candidate_limit - 1,
+                            withscores=True,
+                        )
+                    else:
+                        candidate_rows = UserSubscription.story_hashes(
+                            self.user.pk,
+                            feed_ids=[self.feed.pk],
+                            order=order,
+                            read_filter=read_filter,
+                            offset=0,
+                            limit=candidate_limit,
+                            include_timestamps=True,
+                            cutoff_date=cutoff_date,
+                            date_filter_start=date_filter_start,
+                            date_filter_end=date_filter_end,
+                            metrics_source=metrics_source,
+                        )
+                    candidate_hashes, candidate_scores = split_story_hash_scores(candidate_rows)
+                    if len(candidate_hashes) < candidate_limit or candidate_limit >= max(page_end * 4, 400):
+                        break
+                    candidate_limit = min(candidate_limit * 2, max(page_end * 4, 400))
+
+                new_hashes = []
+                for story_hash in candidate_hashes:
+                    if story_hash_cache_member(story_hash) in cached_hashes:
+                        continue
+                    new_hashes.append(story_hash)
+                    if len(new_hashes) >= needed_count:
+                        break
+                cache_story_hash_scores(new_hashes, candidate_scores)
+
+            if order == "oldest":
+                story_hashes = r.zrange(unread_page_cache_key, start=offset, end=offset + limit - 1)
+            else:
+                story_hashes = r.zrevrange(unread_page_cache_key, start=offset, end=offset + limit - 1)
+        elif offset and r.exists(unread_ranked_stories_key):
+            if self.needs_unread_recalc:
+                logging.info(
+                    "reader_unread_fast_path_dirty "
+                    f"source={metrics_source} feed_id={self.feed_id} "
+                    f"offset={offset} order={order}"
+                )
+            byscorefunc = r.zrevrange
+            if order == "oldest":
+                byscorefunc = r.zrange
+            story_hashes = byscorefunc(unread_ranked_stories_key, start=offset, end=offset + limit)[:limit]
+            if read_filter == "unread":
+                cache_rows = byscorefunc(
+                    unread_ranked_stories_key,
+                    start=0,
+                    end=offset + limit - 1,
+                    withscores=True,
+                )
+                cache_hashes, cache_scores = split_story_hash_scores(cache_rows)
+                cache_story_hash_scores(cache_hashes, cache_scores)
+        else:
+            story_hash_rows = UserSubscription.story_hashes(
+                self.user.pk,
+                feed_ids=[self.feed.pk],
+                order=order,
+                read_filter=read_filter,
+                offset=offset,
+                limit=limit,
+                include_timestamps=read_filter == "unread",
+                cutoff_date=cutoff_date,
+                date_filter_start=date_filter_start,
+                date_filter_end=date_filter_end,
+                metrics_source=metrics_source,
+            )
+            story_hashes, story_scores = split_story_hash_scores(story_hash_rows)
+            if read_filter == "unread":
+                if offset == 0:
+                    r.delete(unread_page_cache_key)
+                cache_story_hash_scores(story_hashes, story_scores)
+
+        story_date_order = "%sstory_date" % ("" if order == "oldest" else "-")
+        mstories = MStory.objects(story_hash__in=story_hashes).order_by(story_date_order)
+        stories = Feed.format_stories(mstories)
+        return stories
+
+    @classmethod
+    def get_river_cache_keys(cls, user_id, feed_ids, cache_prefix=""):
+        """Generate consistent cache key names for river stories.
+
+        This helper ensures cache creation and deletion use identical keys.
+
+        Args:
+            user_id: User ID
+            feed_ids: List of feed IDs (must be validated/filtered)
+            cache_prefix: Optional prefix for cache keys (e.g., "dashboard:")
+
+        Returns:
+            Tuple of (ranked_stories_key, unread_ranked_stories_key)
+        """
+        feeds_string = ",".join(str(f) for f in sorted(feed_ids))
+        feeds_digest = hashlib.sha1(feeds_string.encode("utf-8")).hexdigest()
+        feeds_key = f"{len(feed_ids)}:{feeds_digest}"
+        ranked_stories_key = "%szU:%s:feeds:%s" % (cache_prefix, user_id, feeds_key)
+        unread_ranked_stories_key = "%szhU:%s:feeds:%s" % (cache_prefix, user_id, feeds_key)
+        return ranked_stories_key, unread_ranked_stories_key
+
+    @classmethod
+    def unread_story_hashes_for_story_hashes(cls, user_id, story_hashes, usersubs=None, cutoff_date=None):
+        """
+        Return the subset of provided story hashes that are currently unread.
+
+        This is used by all-story river pages, where read status is needed only
+        for the returned page. Avoid building a full unread companion river.
+        """
+        if not story_hashes:
+            return []
+
+        story_hash_feed_ids = []
+        feed_ids = set()
+        for story_hash in story_hashes:
+            if isinstance(story_hash, bytes):
+                story_hash = story_hash.decode()
+            if not story_hash:
+                continue
+            feed_id, _ = MStory.split_story_hash(story_hash)
+            if feed_id is None:
+                continue
+            feed_id = int(feed_id)
+            story_hash_feed_ids.append((story_hash, feed_id))
+            feed_ids.add(feed_id)
+
+        if not story_hash_feed_ids:
+            return []
+
+        r = redis.Redis(connection_pool=settings.REDIS_STORY_HASH_POOL)
+        user = User.objects.get(pk=user_id)
+        if not cutoff_date:
+            cutoff_date = user.profile.unread_cutoff
+        if not usersubs:
+            usersubs = cls.subs_for_feeds(user_id, feed_ids=feed_ids, read_filter="all")
+
+        usersubs_by_feed = {sub.feed_id: sub for sub in usersubs if sub.feed_id in feed_ids}
+
+        read_dates = {}
+        for feed_id, us in usersubs_by_feed.items():
+            read_dates[feed_id] = int(max(us.mark_read_date, cutoff_date).strftime("%s"))
+
+        pipeline = r.pipeline()
+        for story_hash, feed_id in story_hash_feed_ids:
+            pipeline.sismember(f"RS:{user_id}", story_hash)
+            pipeline.sismember(f"RS:{user_id}:{feed_id}", story_hash)
+            pipeline.zscore(f"uU:{user_id}:{feed_id}", story_hash)
+            pipeline.zscore(f"zF:{feed_id}", story_hash)
+        results = pipeline.execute()
+
+        unread_story_hashes = []
+        for i, (story_hash, feed_id) in enumerate(story_hash_feed_ids):
+            read_in_global = results[i * 4]
+            read_in_feed = results[i * 4 + 1]
+            manual_unread_score = results[i * 4 + 2]
+            story_score = results[i * 4 + 3]
+
+            if manual_unread_score is not None:
+                unread_story_hashes.append(story_hash)
+                continue
+            if read_in_global or read_in_feed:
+                continue
+            if story_score is None or feed_id not in read_dates:
+                continue
+            if story_score >= read_dates[feed_id]:
+                unread_story_hashes.append(story_hash)
+
+        return unread_story_hashes
+
+    @classmethod
+    def feed_stories(
+        cls,
+        user_id,
+        feed_ids=None,
+        offset=0,
+        limit=6,
+        order="newest",
+        read_filter="all",
+        usersubs=None,
+        cutoff_date=None,
+        all_feed_ids=None,
+        cache_prefix="",
+        date_filter_start=None,
+        date_filter_end=None,
+        use_lazy_merge=False,  # Deprecated: lazy merge is now always used
+        metrics_source="other",
+    ):
+        metrics_source = normalize_reader_metrics_source(metrics_source)
+        rt = redis.Redis(connection_pool=settings.REDIS_STORY_HASH_POOL)
+        across_all_feeds = False
+
+        if order == "oldest":
+            range_func = rt.zrange
+        else:
+            range_func = rt.zrevrange
+
+        if feed_ids is None:
+            across_all_feeds = True
+            feed_ids = []
+        # Keep page caches keyed to the stable requested feed set while merging
+        # only the feeds that can currently contribute stories.
+        if not all_feed_ids:
+            all_feed_ids = [f for f in feed_ids]
+        cache_feed_ids = [f for f in all_feed_ids]
+
+        # Use helper method to generate consistent cache keys
+        ranked_stories_keys, unread_ranked_stories_keys = cls.get_river_cache_keys(
+            user_id, cache_feed_ids, cache_prefix
+        )
+        stories_cached = rt.exists(ranked_stories_keys)
+        if offset and stories_cached:
+            story_hashes = range_func(ranked_stories_keys, offset, offset + limit)
+            if story_hashes:
+                if read_filter == "unread":
+                    unread_story_hashes = story_hashes
+                else:
+                    unread_story_hashes = cls.unread_story_hashes_for_story_hashes(
+                        user_id,
+                        story_hashes,
+                        usersubs=usersubs,
+                        cutoff_date=cutoff_date,
+                    )
+                return story_hashes, unread_story_hashes
+            # Cache exists but doesn't cover this offset — fall through to
+            # extend via lazy merge (don't delete, it has valid earlier pages)
+        else:
+            rt.delete(ranked_stories_keys)
+            rt.delete(unread_ranked_stories_keys)
+
+        def lazy_merge_story_hashes(target_read_filter, target_offset, target_limit, cache_key=None):
+            """K-way merge of per-feed story streams using a heap, avoiding ZUNIONSTORE.
+
+            When cache_key is provided, writes merged results to Redis so that
+            page 2+ can reuse the cache instead of re-merging from scratch.
+            """
+            # When extending an existing cache (page 2+), skip already-cached
+            # stories instead of using target_offset. This prevents pagination
+            # drift when stories marked as read cause zdiffstore to recompute
+            # the per-feed unread sets, shifting the merged list and causing
+            # the offset to skip stories the user hasn't seen yet.
+            extending_cache = False
+            if cache_key:
+                extending_cache = bool(rt.zcard(cache_key))
+
+            per_feed_chunk = 25
+            per_feed_offsets = {feed_id: per_feed_chunk for feed_id in feed_ids}
+            per_feed_indices = {feed_id: 0 for feed_id in feed_ids}
+
+            per_feed_batches = cls.story_hashes(
+                user_id,
+                feed_ids=feed_ids,
+                read_filter=target_read_filter,
+                order=order,
+                include_timestamps=True,
+                usersubs=usersubs,
+                cutoff_date=cutoff_date,
+                across_all_feeds=across_all_feeds,
+                store_stories_key=None,
+                group_by_feed=True,
+                offset=0,
+                limit=per_feed_chunk,
+                date_filter_start=date_filter_start,
+                date_filter_end=date_filter_end,
+                metrics_source=metrics_source,
+            )
+
+            per_feed_has_more = {
+                feed_id: len(per_feed_batches.get(feed_id, [])) == per_feed_chunk for feed_id in feed_ids
+            }
+            per_feed_buffers = {feed_id: per_feed_batches.get(feed_id, []) for feed_id in feed_ids}
+
+            heap = []
+            score_transform = (lambda score: -score) if order == "newest" else (lambda score: score)
+
+            def push_next_from_feed(feed_id):
+                buffer = per_feed_buffers.get(feed_id, [])
+                idx = per_feed_indices.get(feed_id, 0)
+
+                # Refill buffer when exhausted and more stories might exist for this feed
+                while idx >= len(buffer) and per_feed_has_more.get(feed_id):
+                    next_chunk = cls.story_hashes(
+                        user_id,
+                        feed_ids=[feed_id],
+                        read_filter=target_read_filter,
+                        order=order,
+                        include_timestamps=True,
+                        usersubs=usersubs,
+                        cutoff_date=cutoff_date,
+                        across_all_feeds=across_all_feeds,
+                        store_stories_key=None,
+                        group_by_feed=True,
+                        offset=per_feed_offsets[feed_id],
+                        limit=per_feed_chunk,
+                        date_filter_start=date_filter_start,
+                        date_filter_end=date_filter_end,
+                        metrics_source=metrics_source,
+                    )
+                    buffer = next_chunk.get(feed_id, [])
+                    per_feed_buffers[feed_id] = buffer
+                    per_feed_indices[feed_id] = 0
+                    per_feed_offsets[feed_id] += per_feed_chunk
+                    per_feed_has_more[feed_id] = len(buffer) == per_feed_chunk
+                    idx = per_feed_indices[feed_id]
+
+                if idx < len(buffer):
+                    story_hash, score = buffer[idx]
+                    per_feed_indices[feed_id] = idx + 1
+                    heapq.heappush(heap, (score_transform(score), feed_id, story_hash))
+
+            for feed_id in feed_ids:
+                push_next_from_feed(feed_id)
+
+            merged_story_hashes = []
+            merged_with_scores = []
+            total_seen = 0
+            merge_target = target_limit if extending_cache else target_offset + target_limit
+            if extending_cache:
+                membership_batch_size = max(per_feed_chunk, target_limit * 3)
+                while heap and len(merged_story_hashes) < merge_target:
+                    candidates = []
+                    while heap and len(candidates) < membership_batch_size:
+                        transformed_score, feed_id, story_hash = heapq.heappop(heap)
+                        original_score = -transformed_score if order == "newest" else transformed_score
+                        candidates.append((story_hash, original_score))
+                        push_next_from_feed(feed_id)
+
+                    cached_scores = rt.zmscore(cache_key, [story_hash for story_hash, _ in candidates])
+                    for (story_hash, original_score), cached_score in zip(candidates, cached_scores):
+                        if cached_score is not None:
+                            continue
+                        if len(merged_story_hashes) < merge_target:
+                            merged_story_hashes.append(story_hash)
+                        if cache_key:
+                            merged_with_scores.append((story_hash, original_score))
+            else:
+                while heap and len(merged_story_hashes) < merge_target:
+                    transformed_score, feed_id, story_hash = heapq.heappop(heap)
+                    original_score = -transformed_score if order == "newest" else transformed_score
+                    if total_seen < target_offset:
+                        # Fresh merge (page 1 or expired cache): traditional offset skip,
+                        # but still cache skipped stories for future page extensions.
+                        if cache_key:
+                            merged_with_scores.append((story_hash, original_score))
+                        total_seen += 1
+                        push_next_from_feed(feed_id)
+                        continue
+                    merged_story_hashes.append(story_hash)
+                    if cache_key:
+                        merged_with_scores.append((story_hash, original_score))
+                    total_seen += 1
+                    push_next_from_feed(feed_id)
+
+            # Cache merged results in Redis so page 2+ can reuse them.
+            # Use ZADD without DELETE so pagination extends the cache
+            # incrementally (page 1 caches 12, page 2 adds 12 more, etc.)
+            if cache_key and merged_with_scores:
+                pipe = rt.pipeline()
+                pipe.zadd(cache_key, {h: s for h, s in merged_with_scores})
+                pipe.expire(cache_key, 60 * 60)
+                pipe.execute()
+
+            return merged_story_hashes
+
+        # Always use lazy merge (k-way heap) instead of ZUNIONSTORE to avoid
+        # blocking Redis. Works for any feed count — overhead is negligible for
+        # small feed lists and eliminates slowlog entries for large ones.
+        story_hashes = lazy_merge_story_hashes(
+            read_filter,
+            offset,
+            limit,
+            cache_key=ranked_stories_keys,
+        )
+
+        if read_filter == "unread":
+            unread_feed_story_hashes = story_hashes
+            # Copy ranked key to unread key (small ZUNIONSTORE on cached results only)
+            pipe = rt.pipeline()
+            pipe.delete(unread_ranked_stories_keys)
+            pipe.zunionstore(unread_ranked_stories_keys, [ranked_stories_keys])
+            pipe.expire(unread_ranked_stories_keys, 60 * 60)
+            pipe.execute()
+        else:
+            unread_feed_story_hashes = cls.unread_story_hashes_for_story_hashes(
+                user_id,
+                story_hashes,
+                usersubs=usersubs,
+                cutoff_date=cutoff_date,
+            )
+
+        rt.expire(ranked_stories_keys, 60 * 60)
+        rt.expire(unread_ranked_stories_keys, 60 * 60)
+
+        return story_hashes, unread_feed_story_hashes
+
+    @classmethod
+    def truncate_river(cls, user_id, feed_ids, read_filter, cache_prefix=""):
+        rt = redis.Redis(connection_pool=settings.REDIS_STORY_HASH_POOL)
+
+        # Use helper method to generate consistent cache keys
+        ranked_stories_keys, unread_ranked_stories_keys = cls.get_river_cache_keys(
+            user_id, feed_ids, cache_prefix
+        )
+        stories_cached = rt.exists(ranked_stories_keys)
+        unreads_cached = rt.exists(unread_ranked_stories_keys)
+        truncated = 0
+        if stories_cached:
+            truncated += rt.zcard(ranked_stories_keys)
+            rt.delete(ranked_stories_keys)
+        # else:
+        #     logging.debug(" ***> ~FRNo stories cached, can't truncate: %s / %s" % (User.objects.get(pk=user_id), feed_ids))
+
+        if unreads_cached:
+            truncated += rt.zcard(unread_ranked_stories_keys)
+            rt.delete(unread_ranked_stories_keys)
+        # else:
+        #     logging.debug(" ***> ~FRNo unread stories cached, can't truncate: %s / %s" % (User.objects.get(pk=user_id), feed_ids))
+
+        return truncated
+
+    @classmethod
+    def add_subscription(
+        cls, user, feed_address, folder=None, bookmarklet=False, auto_active=True, skip_fetch=False
+    ):
+        feed = None
+        us = None
+
+        logging.user(
+            user,
+            "~FRAdding URL: ~SB%s (in %s) %s"
+            % (feed_address, folder, "~FCAUTO-ADD" if not auto_active else ""),
+        )
+
+        feed = Feed.get_feed_from_url(feed_address, user=user)
+
+        if not feed:
+            code = -1
+            if bookmarklet:
+                message = "This site does not have an RSS feed. Nothing is linked to from this page."
+            else:
+                message = "This address does not point to an RSS feed or a website with an RSS feed."
+        else:
+            us, subscription_created = cls.objects.get_or_create(
+                feed=feed,
+                user=user,
+                defaults={
+                    "needs_unread_recalc": True,
+                    "active": auto_active,
+                },
+            )
+            code = 1
+            message = ""
+
+        if us:
+            user_sub_folders_object, created = UserSubscriptionFolders.objects.get_or_create(
+                user=user, defaults={"folders": "[]"}
+            )
+            if created:
+                user_sub_folders = []
+            else:
+                user_sub_folders = json.decode(user_sub_folders_object.folders)
+            user_sub_folders = add_object_to_folder(feed.pk, folder, user_sub_folders)
+            user_sub_folders_object.folders = json.encode(user_sub_folders)
+            user_sub_folders_object.save()
+
+            if not us.active:
+                us.active = True
+                us.save()
+
+            if not skip_fetch and feed.last_update < datetime.datetime.utcnow() - datetime.timedelta(days=1):
+                feed = feed.update(verbose=True)
+
+            feed.setup_feed_for_premium_subscribers()
+            feed.count_subscribers()
+
+            if feed.archive_count:
+                feed.schedule_fetch_archive_feed()
+
+            r = redis.Redis(connection_pool=settings.REDIS_PUBSUB_POOL)
+            r.publish(user.username, "reload:feeds")
+
+        return code, message, us
+
+    @classmethod
+    def feeds_with_updated_counts(cls, user, feed_ids=None, check_fetch_status=False, force=False):
+        feeds = {}
+        silent = not getattr(settings, "TEST_DEBUG", False)
+
+        # Get subscriptions for user
+        user_subs = cls.objects.select_related("feed").filter(user=user, active=True)
+        feed_ids = [
+            f for f in feed_ids if f and not any(f.startswith(prefix) for prefix in ["river", "saved"])
+        ]
+        if feed_ids:
+            user_subs = user_subs.filter(feed__in=feed_ids)
+
+        for i, sub in enumerate(user_subs):
+            # Count unreads if subscription is stale.
+            if (
+                force
+                or sub.needs_unread_recalc
+                or sub.unread_count_updated < user.profile.unread_cutoff
+                or sub.oldest_unread_story_date < user.profile.unread_cutoff
+            ):
+                sub = sub.calculate_feed_scores(silent=silent, force=force)
+            if not sub:
+                continue  # TODO: Figure out the correct sub and give it a new feed_id
+
+            feed_id = sub.feed_id
+            feeds[feed_id] = {
+                "ps": sub.unread_count_positive,
+                "nt": sub.unread_count_neutral,
+                "ng": sub.unread_count_negative,
+                "id": feed_id,
+            }
+            if not sub.feed.fetched_once or check_fetch_status:
+                feeds[feed_id]["fetched_once"] = sub.feed.fetched_once
+                feeds[feed_id]["not_yet_fetched"] = not sub.feed.fetched_once  # Legacy. Dammit.
+            if sub.feed.favicon_fetching:
+                feeds[feed_id]["favicon_fetching"] = True
+            if sub.feed.has_feed_exception or sub.feed.has_page_exception:
+                feeds[feed_id]["has_exception"] = True
+                feeds[feed_id]["exception_type"] = "feed" if sub.feed.has_feed_exception else "page"
+                feeds[feed_id]["feed_address"] = sub.feed.feed_address
+                feeds[feed_id]["exception_code"] = sub.feed.exception_code
+
+        return feeds
+
+    @classmethod
+    def queue_new_feeds(cls, user, new_feeds=None):
+        if not isinstance(user, User):
+            user = User.objects.get(pk=user)
+
+        if not new_feeds:
+            new_feeds = cls.objects.filter(user=user, feed__fetched_once=False, active=True).values("feed_id")
+            new_feeds = list(set([f["feed_id"] for f in new_feeds]))
+
+        if not new_feeds:
+            return
+
+        logging.user(user, "~BB~FW~SBQueueing NewFeeds: ~FC(%s) %s" % (len(new_feeds), new_feeds))
+        size = 4
+        for t in (new_feeds[pos : pos + size] for pos in range(0, len(new_feeds), size)):
+            NewFeeds.apply_async(args=(t,), queue="new_feeds")
+
+    @classmethod
+    def refresh_stale_feeds(cls, user, exclude_new=False):
+        if not isinstance(user, User):
+            user = User.objects.get(pk=user)
+
+        stale_cutoff = datetime.datetime.now() - datetime.timedelta(days=settings.SUBSCRIBER_EXPIRE)
+
+        # TODO: Refactor below using last_update from REDIS_FEED_UPDATE_POOL
+        stale_feeds = UserSubscription.objects.filter(
+            user=user, active=True, feed__last_update__lte=stale_cutoff
+        )
+        if exclude_new:
+            stale_feeds = stale_feeds.filter(feed__fetched_once=True)
+        all_feeds = UserSubscription.objects.filter(user=user, active=True)
+
+        logging.user(
+            user, "~FG~BBRefreshing stale feeds: ~SB%s/%s" % (stale_feeds.count(), all_feeds.count())
+        )
+
+        for sub in stale_feeds:
+            sub.feed.fetched_once = False
+            sub.feed.save()
+
+        if stale_feeds:
+            stale_feeds = list(set([f.feed_id for f in stale_feeds]))
+            cls.queue_new_feeds(user, new_feeds=stale_feeds)
+
+    @classmethod
+    def schedule_fetch_archive_feeds_for_user(cls, user_id):
+        from apps.profile.tasks import FetchArchiveFeedsForUser
+
+        # One backfill per user at a time. Several payment webhooks for the same upgrade can
+        # reach activate_archive together, and on 2026-10-10 four of them each started a
+        # backfill of the same 3,910 feeds. Each dispatch renews the claim, so it lasts as long
+        # as the backfill keeps going (apps/reader/models.py dispatch_archive_backfill).
+        r = redis.Redis(connection_pool=settings.REDIS_FEED_UPDATE_POOL)
+        if not r.set(cls.archive_backfill_claim_key(user_id), 1, nx=True, ex=ARCHIVE_BACKFILL_STATE_SECONDS):
+            logging.debug(" ---> ~FCArchive backfill already scheduled for user %s, skipping" % user_id)
+            return
+
+        try:
+            FetchArchiveFeedsForUser.apply_async(
+                kwargs=dict(user_id=user_id),
+                queue="archive",
+                time_limit=settings.MAX_SECONDS_COMPLETE_ARCHIVE_FETCH,
+            )
+        except Exception:
+            # Nothing was queued, so the next upgrade event for this user can start the backfill.
+            cls.release_archive_backfill_claim(user_id)
+            raise
+
+    @classmethod
+    def archive_backfill_claim_key(cls, user_id):
+        return "archive_fetch_scheduled:%s" % user_id
+
+    @classmethod
+    def archive_backfill_feeds_key(cls, user_id):
+        return "archive_backfill_feeds:%s" % user_id
+
+    @classmethod
+    def archive_backfill_state_key(cls, user_id):
+        return "archive_backfill_state:%s" % user_id
+
+    @classmethod
+    def archive_backfill_pending_key(cls, user_id, backfill_id):
+        # Scoped to one backfill run, identified by its start time, so a late walk from an
+        # earlier backfill of the same feeds can't end a walk of the current one.
+        return "archive_backfill_pending:%s:%r" % (user_id, backfill_id)
+
+    @classmethod
+    def archive_backfill_dispatch_lock_key(cls, user_id):
+        return "archive_backfill_dispatch:%s" % user_id
+
+    @classmethod
+    def archive_backfill_finished_key(cls, user_id, start_time):
+        return "archive_backfill_finished:%s:%r" % (user_id, start_time)
+
+    @classmethod
+    def release_archive_backfill_claim(cls, user_id):
+        """Let a new archive backfill start for this user, after one failed before it began
+        (apps/reader/models.py schedule_fetch_archive_feeds_for_user)."""
+        r = redis.Redis(connection_pool=settings.REDIS_FEED_UPDATE_POOL)
+        r.delete(cls.archive_backfill_claim_key(user_id))
+
+    @classmethod
+    def store_archive_backfill(cls, user_id, feed_ids):
+        """Record a user's backfill: the feeds whose walks are still to be queued, and its state.
+        The state exists from here until the finish runs, so a dispatch can tell a backfill whose
+        feeds have all been queued from one that was abandoned (apps/reader/models.py
+        dispatch_archive_backfill)."""
+        r = redis.Redis(connection_pool=settings.REDIS_FEED_UPDATE_POOL)
+        feeds_key = cls.archive_backfill_feeds_key(user_id)
+        p = r.pipeline()
+        p.delete(feeds_key)
+        if feed_ids:
+            p.rpush(feeds_key, *feed_ids)
+            p.expire(feeds_key, ARCHIVE_BACKFILL_STATE_SECONDS)
+        p.set(cls.archive_backfill_state_key(user_id), 1, ex=ARCHIVE_BACKFILL_STATE_SECONDS)
+        p.execute()
+
+    @classmethod
+    def track_archive_backfill_walks(cls, user_id, backfill_id, feed_ids):
+        """Note walks of a backfill as queued and not yet ended. Walks are tracked by feed, so a
+        walk delivered twice ends once (apps/reader/models.py end_archive_backfill_walks)."""
+        r = redis.Redis(connection_pool=settings.REDIS_FEED_UPDATE_POOL)
+        pending_key = cls.archive_backfill_pending_key(user_id, backfill_id)
+        p = r.pipeline()
+        p.sadd(pending_key, *feed_ids)
+        p.expire(pending_key, ARCHIVE_BACKFILL_STATE_SECONDS)
+        p.execute()
+
+    @classmethod
+    def end_archive_backfill_walks(cls, user_id, backfill_id, feed_ids):
+        r = redis.Redis(connection_pool=settings.REDIS_FEED_UPDATE_POOL)
+        r.srem(cls.archive_backfill_pending_key(user_id, backfill_id), *feed_ids)
+
+    @classmethod
+    def archive_backfill_walks_pending(cls, user_id, backfill_id):
+        r = redis.Redis(connection_pool=settings.REDIS_FEED_UPDATE_POOL)
+        return r.scard(cls.archive_backfill_pending_key(user_id, backfill_id))
+
+    @classmethod
+    def abandon_archive_backfill(cls, user_id, backfill_id):
+        """Drop a backfill whose dispatcher gave up, so a later upgrade event can start a new one
+        instead of being skipped while the claim lasts (apps/profile/tasks.py DispatchArchiveBackfill)."""
+        r = redis.Redis(connection_pool=settings.REDIS_FEED_UPDATE_POOL)
+        r.delete(
+            cls.archive_backfill_claim_key(user_id),
+            cls.archive_backfill_feeds_key(user_id),
+            cls.archive_backfill_state_key(user_id),
+            cls.archive_backfill_pending_key(user_id, backfill_id),
+        )
+
+    # Should be run as a background task
+    @classmethod
+    def fetch_archive_feeds_for_user(cls, user_id):
+        from apps.profile.tasks import DispatchArchiveBackfill
+
+        try:
+            feed_ids, start_time, starting_story_count = cls.build_archive_backfill(user_id)
+            cls.store_archive_backfill(user_id, feed_ids)
+            DispatchArchiveBackfill.apply_async(
+                kwargs=dict(
+                    user_id=user_id, start_time=start_time, starting_story_count=starting_story_count
+                ),
+                queue="archive",
+            )
+        except Exception:
+            # No feed's walk is queued until the dispatcher runs, so free the claim for the next
+            # upgrade event without any risk of walking a feed twice.
+            cls.release_archive_backfill_claim(user_id)
+            raise
+
+    @classmethod
+    def build_archive_backfill(cls, user_id):
+        """The feeds of a user's archive backfill and its starting point, gathered without
+        queuing anything (apps/reader/models.py fetch_archive_feeds_for_user)."""
+        start_time = time.time()
+        user = User.objects.get(pk=user_id)
+        r = redis.Redis(connection_pool=settings.REDIS_PUBSUB_POOL)
+        r.publish(user.username, "fetch_archive:start")
+
+        subscriptions = UserSubscription.objects.filter(user=user).only("feed")
+
+        feed_ids = []
+        starting_story_count = 0
+        for sub in subscriptions:
+            try:
+                feed_ids.append(sub.feed.pk)
+            except Feed.DoesNotExist:
+                continue
+            starting_story_count += MStory.objects(story_feed_id=sub.feed.pk).count()
+
+        logging.user(
+            user,
+            "~FCFetching archive stories from ~SB%s feeds~SN, %s every %s seconds..."
+            % (
+                len(feed_ids),
+                ARCHIVE_BACKFILL_BATCH_SIZE,
+                ARCHIVE_BACKFILL_BATCH_SIZE * ARCHIVE_BACKFILL_STAGGER_SECONDS,
+            ),
+        )
+        return feed_ids, start_time, starting_story_count
+
+    @classmethod
+    def dispatch_archive_backfill(cls, user_id, start_time, starting_story_count):
+        """Queue the next batch of a user's archive backfill, one feed's walk every
+        ARCHIVE_BACKFILL_STAGGER_SECONDS, then queue this dispatch again for when the batch's
+        spacing runs out, or the finish once the user's feeds are all queued.
+
+        Queuing every walk up front left countdown tasks waiting in a worker for hours. The
+        broker hands out any task unacknowledged past its one hour visibility timeout again,
+        so on 2026-10-10 every feed of a 3,910 feed backfill was walked once per hour it had
+        waited. Batches keep every countdown here well under that hour.
+
+        A feed comes off the list only after its walk is queued, and by value, so a broker
+        error leaves the rest for the retry (apps/profile/tasks.py DispatchArchiveBackfill)
+        and a second delivery of the same dispatch can't take off feeds nobody queued. The
+        lock keeps two deliveries from dispatching at once."""
+        from apps.profile.tasks import (
+            DispatchArchiveBackfill,
+            FetchArchiveFeedsChunk,
+            FinishFetchArchiveFeeds,
+        )
+
+        r = redis.Redis(connection_pool=settings.REDIS_FEED_UPDATE_POOL)
+        feeds_key = cls.archive_backfill_feeds_key(user_id)
+        state_key = cls.archive_backfill_state_key(user_id)
+        if not r.exists(state_key):
+            logging.debug(
+                " ---> ~FCNo archive backfill to dispatch for user %s, it ended or expired" % user_id
+            )
+            return
+
+        dispatch_lock = r.lock(
+            cls.archive_backfill_dispatch_lock_key(user_id),
+            timeout=ARCHIVE_BACKFILL_BATCH_SIZE * ARCHIVE_BACKFILL_STAGGER_SECONDS,
+            blocking=False,
+        )
+        if not dispatch_lock.acquire():
+            logging.debug(" ---> ~FCArchive backfill for user %s is already being dispatched" % user_id)
+            return
+
+        try:
+            for key in (
+                cls.archive_backfill_claim_key(user_id),
+                feeds_key,
+                state_key,
+                cls.archive_backfill_pending_key(user_id, start_time),
+            ):
+                r.expire(key, ARCHIVE_BACKFILL_STATE_SECONDS)
+
+            batch = [int(feed_id) for feed_id in r.lrange(feeds_key, 0, ARCHIVE_BACKFILL_BATCH_SIZE - 1)]
+            for i, feed_id in enumerate(batch):
+                # Tracked before it is queued, so a walk that ends at once is already there to end;
+                # a failed publish takes it back off.
+                cls.track_archive_backfill_walks(user_id, start_time, [feed_id])
+                try:
+                    FetchArchiveFeedsChunk.apply_async(
+                        kwargs=dict(feed_ids=[feed_id], user_id=user_id, backfill_id=start_time),
+                        queue="archive",
+                        countdown=i * ARCHIVE_BACKFILL_STAGGER_SECONDS,
+                        time_limit=settings.MAX_SECONDS_ARCHIVE_FETCH_SINGLE_FEED,
+                        soft_time_limit=settings.MAX_SECONDS_ARCHIVE_FETCH_SINGLE_FEED - 30,
+                    )
+                except Exception:
+                    cls.end_archive_backfill_walks(user_id, start_time, [feed_id])
+                    raise
+                r.lrem(feeds_key, 1, feed_id)
+
+            backfill_kwargs = dict(
+                user_id=user_id, start_time=start_time, starting_story_count=starting_story_count
+            )
+            if r.llen(feeds_key):
+                DispatchArchiveBackfill.apply_async(
+                    kwargs=backfill_kwargs,
+                    queue="archive",
+                    countdown=len(batch) * ARCHIVE_BACKFILL_STAGGER_SECONDS,
+                )
+                return
+
+            # Every feed is queued. The finish first checks once the last walk could have had its
+            # full time limit, then waits for any walk still going (archive_backfill_ready_to_finish).
+            last_walk_countdown = max(len(batch) - 1, 0) * ARCHIVE_BACKFILL_STAGGER_SECONDS
+            FinishFetchArchiveFeeds.apply_async(
+                args=(None,),
+                kwargs=backfill_kwargs,
+                queue="archive",
+                countdown=last_walk_countdown + settings.MAX_SECONDS_ARCHIVE_FETCH_SINGLE_FEED
+                if batch
+                else 0,
+                time_limit=settings.MAX_SECONDS_COMPLETE_ARCHIVE_FETCH,
+            )
+        finally:
+            try:
+                dispatch_lock.release()
+            except LockError:
+                # The dispatch outlasted the lock, which has already expired.
+                pass
+
+    @classmethod
+    def archive_backfill_ready_to_finish(cls, user_id, start_time, starting_story_count, rechecks):
+        """Whether a backfill's finish should run now. While walks are still going it queues
+        itself to check again, for up to ARCHIVE_BACKFILL_FINISH_MAX_RECHECKS times, since a
+        walk killed at its hard time limit never ends its tracking. If the check can't be
+        queued it runs now: the finish is acknowledged when it starts, so nothing else would
+        ever run it. Only one finish runs per backfill, however many copies of it arrive
+        (apps/profile/tasks.py FinishFetchArchiveFeeds)."""
+        from apps.profile.tasks import FinishFetchArchiveFeeds
+
+        pending_walks = cls.archive_backfill_walks_pending(user_id, start_time)
+        if pending_walks > 0 and rechecks < ARCHIVE_BACKFILL_FINISH_MAX_RECHECKS:
+            logging.debug(
+                " ---> ~FCArchive backfill for user %s still has %s walks going, checking again in %s seconds"
+                % (user_id, pending_walks, ARCHIVE_BACKFILL_FINISH_RECHECK_SECONDS)
+            )
+            try:
+                FinishFetchArchiveFeeds.apply_async(
+                    args=(None,),
+                    kwargs=dict(
+                        user_id=user_id,
+                        start_time=start_time,
+                        starting_story_count=starting_story_count,
+                        rechecks=rechecks + 1,
+                    ),
+                    queue="archive",
+                    countdown=ARCHIVE_BACKFILL_FINISH_RECHECK_SECONDS,
+                    time_limit=settings.MAX_SECONDS_COMPLETE_ARCHIVE_FETCH,
+                )
+                return False
+            except Exception as e:
+                logging.debug(
+                    " ---> ~FRCouldn't queue the archive backfill check for user %s, finishing now: %s"
+                    % (user_id, e)
+                )
+
+        r = redis.Redis(connection_pool=settings.REDIS_FEED_UPDATE_POOL)
+        if not r.set(
+            cls.archive_backfill_finished_key(user_id, start_time),
+            1,
+            nx=True,
+            ex=ARCHIVE_BACKFILL_STATE_SECONDS,
+        ):
+            logging.debug(" ---> ~FCArchive backfill for user %s already finished" % user_id)
+            return False
+        # The claim goes too, so a user who downgrades and upgrades again gets a new backfill.
+        r.delete(
+            cls.archive_backfill_claim_key(user_id),
+            cls.archive_backfill_feeds_key(user_id),
+            cls.archive_backfill_state_key(user_id),
+            cls.archive_backfill_pending_key(user_id, start_time),
+        )
+        return True
+
+    @classmethod
+    def fetch_archive_feeds_chunk(cls, feed_ids, user_id=None, backfill_id=None):
+        from apps.rss_feeds.models import Feed
+
+        try:
+            r = redis.Redis(connection_pool=settings.REDIS_PUBSUB_POOL)
+            if user_id:
+                user = User.objects.get(pk=user_id)
+                logging.user(user, "~FCFetching archive stories from %s feeds..." % len(feed_ids))
+            else:
+                logging.debug("~FCFetching archive stories from %s feeds..." % len(feed_ids))
+
+            for feed_id in feed_ids:
+                feed = Feed.get_by_id(feed_id)
+                if not feed:
+                    continue
+
+                feed.fill_out_archive_stories()
+
+            if user_id:
+                r.publish(user.username, "fetch_archive:feeds:%s" % ",".join([str(f) for f in feed_ids]))
+        finally:
+            if user_id and backfill_id is not None:
+                # The backfill's finish waits for this walk (archive_backfill_ready_to_finish).
+                cls.end_archive_backfill_walks(user_id, backfill_id, feed_ids)
+
+    @classmethod
+    def finish_fetch_archive_feeds(cls, user_id, start_time, starting_story_count):
+        r = redis.Redis(connection_pool=settings.REDIS_PUBSUB_POOL)
+        user = User.objects.get(pk=user_id)
+        subscriptions = UserSubscription.objects.filter(user=user).only("feed")
+        total = subscriptions.count()
+        duration = time.time() - start_time
+
+        ending_story_count = 0
+        pre_archive_count = 0
+        for sub in subscriptions:
+            try:
+                ending_story_count += MStory.objects(story_feed_id=sub.feed.pk).count()
+                pre_archive_count += Feed.get_by_id(sub.feed.pk).number_of_stories_to_store(pre_archive=True)
+            except Feed.DoesNotExist:
+                continue
+
+        new_story_count = ending_story_count - starting_story_count
+        logging.user(
+            user,
+            f"~FCFinished archive feed fetches for ~SB~FG{subscriptions.count()} feeds~FC~SN: ~FG~SB{new_story_count:,} new~SB~FC, ~FG{ending_story_count:,} total (pre-archive: {pre_archive_count:,} stories)",
+        )
+
+        logging.user(
+            user,
+            "~FCFetched archive stories from ~SB%s feeds~SN in ~FM~SB%s~FC~SN sec."
+            % (total, round(duration, 2)),
+        )
+        r.publish(user.username, "fetch_archive:done")
+
+        # Sync Redis story hashes now that archive fetch is done, staggered to avoid Redis spike.
+        # The archive fetch skips sync_redis so the syncs below do not storm Redis mid-fetch.
+        logging.user(
+            user, "~FC~SBSyncing Redis story hashes for ~SB%s feeds~SN after archive fetch..." % total
+        )
+        for i, sub in enumerate(subscriptions):
+            try:
+                feed = Feed.get_by_id(sub.feed.pk)
+                if feed:
+                    feed.sync_redis()
+                    if i < total - 1:
+                        time.sleep(0.5)
+            except Feed.DoesNotExist:
+                continue
+
+        return ending_story_count, min(pre_archive_count, starting_story_count)
+
+    def trim_read_stories(self, r=None):
+        if not r:
+            r = redis.Redis(connection_pool=settings.REDIS_STORY_HASH_POOL)
+
+        read_stories_key = "RS:%s:%s" % (self.user_id, self.feed_id)
+        stale_story_hashes = r.sdiff(read_stories_key, "F:%s" % self.feed_id)
+        if not stale_story_hashes:
+            return
+
+        logging.user(
+            self.user,
+            "~FBTrimming ~FR%s~FB read stories (~SB%s~SN)..." % (len(stale_story_hashes), self.feed_id),
+        )
+        r.srem(read_stories_key, *stale_story_hashes)
+        r.srem("RS:%s" % self.user_id, *stale_story_hashes)
+
+    @classmethod
+    def trim_user_read_stories(self, user_id):
+        try:
+            user = User.objects.get(pk=user_id)
+        except User.DoesNotExist:
+            # The cleanup task can run after the user has been deleted
+            logging.debug(" ---> ~FRCan't trim read stories, no user for user_id: ~SB%s" % user_id)
+            return
+
+        r = redis.Redis(connection_pool=settings.REDIS_STORY_HASH_POOL)
+        subs = UserSubscription.objects.filter(user_id=user_id).only("feed")
+        if not subs:
+            return
+
+        key = "RS:%s" % user_id
+        feeds = set(f.feed_id for f in subs)
+        old_rs = r.smembers(key)
+        old_count = len(old_rs)
+        if not old_count:
+            logging.user(user, "~FBTrimming all read stories, ~SBnone found~SN.")
+            return
+
+        # Batch the SUNIONSTORE to avoid blocking Redis for 1+ seconds
+        # when users have 1000+ feeds. Each batch blocks for ~80ms max.
+        feed_keys = ["%s:%s" % (key, f) for f in sorted(feeds)]
+        batch_size = 100
+        if len(feed_keys) <= batch_size:
+            r.sunionstore(key, *feed_keys)
+        else:
+            temp_key = "%s:trim_temp:%s" % (key, uuid.uuid4().hex)
+            for i in range(0, len(feed_keys), batch_size):
+                batch = feed_keys[i : i + batch_size]
+                if i == 0:
+                    r.sunionstore(temp_key, *batch)
+                else:
+                    r.sunionstore(temp_key, temp_key, *batch)
+            if r.exists(temp_key):
+                r.rename(temp_key, key)
+            else:
+                r.delete(key)
+        new_count = r.scard(key)
+
+        missing_rs = []
+        missing_count = 0
+        feed_re = re.compile(r"(\d+):.*?")
+        for i, rs in enumerate(old_rs):
+            if i and i % 1000 == 0:
+                if missing_rs:
+                    r.sadd(key, *missing_rs)
+                missing_count += len(missing_rs)
+                missing_rs = []
+            found = feed_re.search(rs)
+            if not found:
+                print(" ---> Not found: %s" % rs)
+                continue
+            rs_feed_id = found.groups()[0]
+            if int(rs_feed_id) not in feeds:
+                missing_rs.append(rs)
+
+        if missing_rs:
+            r.sadd(key, *missing_rs)
+        missing_count += len(missing_rs)
+        new_total = new_count + missing_count
+        logging.user(
+            user,
+            "~FBTrimming ~FR%s~FB/%s (~SB%s sub'ed ~SN+ ~SB%s unsub'ed~SN saved)"
+            % (old_count - new_total, old_count, new_count, missing_count),
+        )
+
+    def mark_feed_read(self, cutoff_date=None, force=False):
+        # Zero badge counts can't always be trusted: they go stale whenever a
+        # recount is missed (the webfeed notify bug left thousands of subs with
+        # zero badges over weeks of unread stories), and skipping on stale zeros
+        # makes an explicit mark-read a silent no-op -- the un-advanced cutoff
+        # then resurfaces all those stories as unread at the next recount. User
+        # actions (mark_all_as_read, mark_feed_as_read in apps/reader/views.py)
+        # pass force=True to advance the cutoff regardless of what the badges
+        # claim. Internal recount-driven calls (calculate_feed_scores) keep the
+        # skip: they run right after computing a zero, and forcing there would
+        # cement a wrong zero from a racing recount by marking everything read.
+        if (
+            not force
+            and self.unread_count_negative == 0
+            and self.unread_count_neutral == 0
+            and self.unread_count_positive == 0
+            and not self.needs_unread_recalc
+        ):
+            return
+
+        recount = True
+        # Use the latest story to get last read time.
+        if cutoff_date:
+            cutoff_date = cutoff_date + datetime.timedelta(seconds=1)
+        else:
+            now = datetime.datetime.now()
+            latest_story = (
+                MStory.objects(story_feed_id=self.feed.pk, story_date__lte=now)
+                .order_by("-story_date")
+                .only("story_date")
+                .limit(1)
+            )
+            if latest_story and len(latest_story) >= 1:
+                cutoff_date = latest_story[0]["story_date"] + datetime.timedelta(seconds=1)
+            else:
+                cutoff_date = datetime.datetime.utcnow()
+                recount = False
+
+        if cutoff_date > self.mark_read_date or cutoff_date > self.oldest_unread_story_date:
+            self.last_read_date = cutoff_date
+            self.mark_read_date = cutoff_date
+            self.oldest_unread_story_date = cutoff_date
+        else:
+            logging.user(
+                self.user,
+                "Not marking %s as read: %s > %s/%s"
+                % (self, cutoff_date, self.mark_read_date, self.oldest_unread_story_date),
+            )
+
+        if not recount:
+            self.unread_count_negative = 0
+            self.unread_count_positive = 0
+            self.unread_count_neutral = 0
+            self.unread_count_updated = datetime.datetime.utcnow()
+            self.needs_unread_recalc = False
+        else:
+            self.needs_unread_recalc = True
+
+        self.save()
+
+        return True
+
+    def mark_newer_stories_read(self, cutoff_date):
+        if (
+            self.unread_count_negative == 0
+            and self.unread_count_neutral == 0
+            and self.unread_count_positive == 0
+            and not self.needs_unread_recalc
+        ):
+            return
+
+        cutoff_date = cutoff_date - datetime.timedelta(seconds=1)
+        story_hashes = UserSubscription.story_hashes(
+            self.user.pk,
+            feed_ids=[self.feed.pk],
+            order="newest",
+            read_filter="unread",
+            cutoff_date=cutoff_date,
+        )
+        data = self.mark_story_ids_as_read(story_hashes, aggregated=True)
+        return data
+
+    def mark_story_ids_as_read(self, story_hashes, request=None, aggregated=False):
+        data = dict(code=0, payload=story_hashes)
+        r = redis.Redis(connection_pool=settings.REDIS_PUBSUB_POOL)
+
+        if not request:
+            request = self.user
+
+        if not self.needs_unread_recalc:
+            self.needs_unread_recalc = True
+            UserSubscription.objects.filter(pk=self.pk).update(needs_unread_recalc=True)
+
+        if len(story_hashes) > 1:
+            logging.user(request, "~FYRead %s stories in feed: %s" % (len(story_hashes), self.feed))
+        else:
+            logging.user(request, "~FYRead story (%s) in feed: %s" % (story_hashes, self.feed))
+            RUserStory.aggregate_mark_read(self.feed_id)
+
+        for story_hash in set(story_hashes):
+            # logging.user(request, "~FYRead story: %s" % (story_hash))
+            RUserStory.mark_read(self.user_id, self.feed_id, story_hash, aggregated=aggregated)
+            r.publish(self.user.username, "story:read:%s" % story_hash)
+
+        r.publish(self.user.username, "feed:%s" % self.feed_id)
+
+        self.last_read_date = datetime.datetime.now()
+        UserSubscription.objects.filter(pk=self.pk).update(last_read_date=self.last_read_date)
+
+        return data
+
+    @classmethod
+    def mark_stories_as_unread(cls, user_id, feed_ids, days):
+        cutoff_date = datetime.datetime.utcnow() - datetime.timedelta(days=days)
+        now = datetime.datetime.utcnow()
+        r = redis.Redis(connection_pool=settings.REDIS_STORY_HASH_POOL)
+        ps = redis.Redis(connection_pool=settings.REDIS_PUBSUB_POOL)
+        user = User.objects.get(pk=user_id)
+        total_stories = 0
+
+        for feed_id in feed_ids:
+            stories = MStory.objects(
+                story_feed_id=feed_id,
+                story_date__gte=cutoff_date,
+                story_date__lte=now,
+            ).only("story_hash", "story_date")
+
+            story_list = list(stories)
+            if not story_list:
+                continue
+
+            expiry = Feed.days_of_story_hashes_for_feed(feed_id) * 24 * 60 * 60
+            all_read_key = "RS:%s" % user_id
+            feed_read_key = "RS:%s:%s" % (user_id, feed_id)
+            list_key = "lRS:%s" % user_id
+
+            pipeline = r.pipeline()
+            for story in story_list:
+                pipeline.srem(all_read_key, story.story_hash)
+                pipeline.srem(feed_read_key, story.story_hash)
+                pipeline.lrem(list_key, 1, story.story_hash)
+            pipeline.expire(all_read_key, expiry)
+            pipeline.expire(feed_read_key, expiry)
+            pipeline.execute()
+
+            total_stories += len(story_list)
+
+            try:
+                usersub = cls.objects.get(user_id=user_id, feed_id=feed_id)
+                if usersub.mark_read_date > cutoff_date:
+                    usersub.mark_read_date = cutoff_date
+                usersub.needs_unread_recalc = True
+                usersub.save()
+            except cls.DoesNotExist:
+                continue
+
+        ps.publish(user.username, "reload:feeds")
+        return total_stories
+
+    def invert_read_stories_after_unread_story(self, story, request=None):
+        data = dict(code=1)
+        unread_cutoff = self.user.profile.unread_cutoff
+        if self.mark_read_date > unread_cutoff:
+            unread_cutoff = self.mark_read_date
+        if story.story_date > unread_cutoff:
+            return data
+
+        # Story is outside the mark as read range, so invert all stories before.
+        newer_stories = MStory.objects(
+            story_feed_id=story.story_feed_id, story_date__gte=story.story_date, story_date__lte=unread_cutoff
+        ).only("story_hash")
+        newer_stories = [s.story_hash for s in newer_stories]
+        self.mark_read_date = story.story_date - datetime.timedelta(minutes=1)
+        self.needs_unread_recalc = True
+        self.save()
+
+        # Mark stories as read only after the mark_read_date has been moved, otherwise
+        # these would be ignored.
+        data = self.mark_story_ids_as_read(newer_stories, request=request, aggregated=True)
+
+        return data
+
+    def get_effective_auto_mark_read_days(
+        self, folder_settings=None, feed_folder_mapping=None, user_profile=None
+    ):
+        """
+        Returns the effective auto_mark_read_days setting following inheritance:
+        feed -> folder (walking up nested hierarchy) -> site-wide
+
+        Returns tuple of (days, source) where source is 'feed', 'folder:FolderName', or 'site-wide'
+
+        Args:
+            folder_settings: Pre-fetched dict of folder_title -> auto_mark_read_days
+            feed_folder_mapping: Pre-fetched dict of feed_id -> list of folder titles
+                                 (use UserSubscriptionFolders.get_feed_folder_mapping() to generate)
+            user_profile: Pre-fetched Profile to avoid N+1 queries on self.user.profile
+        """
+        # First check if feed has explicit setting
+        if self.auto_mark_read_days is not None:
+            if self.auto_mark_read_days == 0:
+                return (None, "feed")  # Explicit "never auto-mark"
+            return (self.auto_mark_read_days, "feed")
+
+        # Find folders containing this feed
+        if feed_folder_mapping is not None:
+            feed_folders = feed_folder_mapping.get(self.feed_id, [])
+        else:
+            try:
+                usf = UserSubscriptionFolders.objects.get(user=self.user)
+                feed_folders = usf.find_feed_folders(self.feed_id)
+            except UserSubscriptionFolders.DoesNotExist:
+                feed_folders = []
+
+        # Get all folder settings for this user if not provided
+        if folder_settings is None:
+            folder_settings = {}
+            for setting in MFolderAutoMarkRead.get_folder_settings_for_user(self.user_id):
+                folder_settings[setting.folder_title] = setting.auto_mark_read_days
+
+        # Walk up the folder hierarchy for each folder containing the feed
+        for folder_title in feed_folders:
+            days, source = self._resolve_folder_auto_mark_read(folder_title, folder_settings)
+            if days is not None or source.startswith("folder:"):
+                return (days, source)
+
+        # Fall back to the site-wide setting
+        profile = user_profile or self.user.profile
+        if profile.days_of_unread:
+            return (profile.days_of_unread, "site-wide")
+
+        return (None, "default")
+
+    def _resolve_folder_auto_mark_read(self, folder_title, folder_settings):
+        """
+        Walk up folder hierarchy to find auto_mark_read_days setting.
+        Folder titles use " - " as hierarchy separator (e.g., "Parent - Child - Grandchild").
+        Returns tuple of (days, source).
+        """
+        if not folder_title:
+            return (None, "default")
+
+        # Check this folder's setting
+        if folder_title in folder_settings:
+            days = folder_settings[folder_title]
+            if days == 0:
+                return (None, f"folder:{folder_title}")  # Explicit "never auto-mark"
+            return (days, f"folder:{folder_title}")
+
+        # Walk up to parent folder (split on " - ")
+        if " - " in folder_title:
+            parent_folder = " - ".join(folder_title.split(" - ")[:-1])
+            return self._resolve_folder_auto_mark_read(parent_folder, folder_settings)
+
+        return (None, "default")
+
+    def get_auto_mark_read_cutoff(self, folder_settings=None, feed_folder_mapping=None, user_profile=None):
+        """
+        Returns the unread cutoff date based on auto_mark_read_days setting.
+        Takes into account feed, folder, and site-wide settings.
+        Returns None if no aging should be applied.
+
+        Args:
+            folder_settings: Pre-fetched dict of folder_title -> auto_mark_read_days
+            feed_folder_mapping: Pre-fetched dict of feed_id -> list of folder titles
+            user_profile: Pre-fetched Profile to avoid N+1 queries on self.user.profile
+        """
+        days, source = self.get_effective_auto_mark_read_days(
+            folder_settings, feed_folder_mapping, user_profile=user_profile
+        )
+        if days is None:
+            return None
+        return datetime.datetime.utcnow() - datetime.timedelta(days=days)
+
+    def calculate_feed_scores(self, silent=False, stories=None, stories_cutoff=None, force=False):
+        # now = datetime.datetime.strptime("2009-07-06 22:30:03", "%Y-%m-%d %H:%M:%S")
+        now = datetime.datetime.now()
+        oldest_unread_story_date = now
+
+        if self.user.profile.last_seen_on < self.user.profile.unread_cutoff and not force:
+            if not silent and settings.DEBUG:
+                logging.info(" ---> [%s] SKIPPING Computing scores: %s (1 week+)" % (self.user, self.feed))
+            return self
+        ong = self.unread_count_negative
+        ont = self.unread_count_neutral
+        ops = self.unread_count_positive
+        oousd = self.oldest_unread_story_date
+        ucu = self.unread_count_updated
+        onur = self.needs_unread_recalc
+        oit = self.is_trained
+        # Snapshot last_read_date before sampling unread stories below, so the
+        # write-back can detect a story marked read mid-recompute and avoid
+        # clobbering the recalc flag (see the conditional clear at the end).
+        olrd = self.last_read_date
+
+        # if not self.feed.fetched_once:
+        #     if not silent:
+        #         logging.info(' ---> [%s] NOT Computing scores: %s' % (self.user, self.feed))
+        #     self.needs_unread_recalc = False
+        #     self.save()
+        #     return
+
+        feed_scores = dict(negative=0, neutral=0, positive=0)
+
+        # Determine the unread cutoff. Per-feed/folder settings take priority over site-wide.
+        # Check for per-feed or per-folder auto_mark_read_days setting first
+        auto_mark_cutoff = self.get_auto_mark_read_cutoff()
+        if auto_mark_cutoff is not None:
+            date_delta = auto_mark_cutoff
+        else:
+            date_delta = self.user.profile.unread_cutoff
+
+        if date_delta < self.mark_read_date:
+            date_delta = self.mark_read_date
+        else:
+            self.mark_read_date = date_delta
+
+        if self.is_trained:
+            if not stories:
+                # The fetch-time prefetch is cached as {"stories": [...], "cutoff": dt}.
+                # The cutoff records how far back the prefetch reaches (see
+                # utils/feed_fetcher.py: it is bounded to DAYS_OF_UNREAD rather than
+                # the feed's archive-wide unread_cutoff).
+                cached_stories = cache.get("S:v4:%s" % self.feed_id)
+                if isinstance(cached_stories, dict):
+                    stories = cached_stories.get("stories")
+                    stories_cutoff = cached_stories.get("cutoff")
+
+            if stories and stories_cutoff and date_delta < stories_cutoff:
+                # This subscriber's unread window reaches further back than the
+                # prefetch covers (an archive user with a long days_of_unread and an
+                # old mark_read_date). Using the truncated list would undercount, so
+                # discard it and fall through to the targeted per-user query below.
+                stories = None
+                stories_cutoff = None
+
+            unread_story_hashes = self.story_hashes(
+                user_id=self.user_id,
+                feed_ids=[self.feed_id],
+                usersubs=[self],
+                read_filter="unread",
+                cutoff_date=date_delta,
+                metrics_source="score_recalc",
+            )
+
+            if not stories:
+                try:
+                    stories_db = MStory.objects(story_hash__in=unread_story_hashes).order_by()
+                    stories = Feed.format_stories(stories_db, self.feed_id)
+                except DatabaseError:
+                    try:
+                        stories_db = MStory.objects(story_hash__in=unread_story_hashes).order_by()[:100]
+                        stories = Feed.format_stories(stories_db, self.feed_id)
+                    except DatabaseError:
+                        stories_db = MStory.objects(story_hash__in=unread_story_hashes).order_by()[:25]
+                        stories = Feed.format_stories(stories_db, self.feed_id)
+
+            unread_stories = []
+            for story in stories:
+                # if story['story_date'] < date_delta:
+                #     continue
+                if story["story_hash"] in unread_story_hashes:
+                    unread_stories.append(story)
+                    if story["story_date"] < oldest_unread_story_date:
+                        oldest_unread_story_date = story["story_date"]
+
+            # if not silent:
+            #     logging.info(' ---> [%s]    Format stories: %s' % (self.user, datetime.datetime.now() - now))
+
+            # Folder- and account-scoped classifiers are stored against feed_id=0, so
+            # read them alongside this feed's own classifiers and let the loaded rows
+            # say whether any scoped classifier exists. Filtering them out up front
+            # would cost a second query per classifier collection on every recount.
+            folder_feed_map = None
+            classifier_ids = [self.feed_id, 0]
+
+            classifier_feeds = list(
+                MClassifierFeed.objects(user_id=self.user_id, feed_id=self.feed_id, social_user_id=0)
+            )
+            classifier_authors = list(
+                MClassifierAuthor.objects(user_id=self.user_id, feed_id__in=classifier_ids)
+            )
+            classifier_titles = list(MClassifierTitle.objects(user_id=self.user_id, feed_id__in=classifier_ids))
+            classifier_tags = list(MClassifierTag.objects(user_id=self.user_id, feed_id__in=classifier_ids))
+            classifier_texts = list(MClassifierText.objects(user_id=self.user_id, feed_id__in=classifier_ids))
+            classifier_urls = list(MClassifierUrl.objects(user_id=self.user_id, feed_id__in=classifier_ids))
+
+            # A feed_id=0 row that kept the default "feed" scope matches no story (see
+            # classifier_matches_story_feed in apps/analyzer/models.py), so loading
+            # them costs nothing when the user has no scoped classifiers.
+            has_scoped = any(
+                getattr(classifier, "scope", "feed") != "feed"
+                for classifier in classifier_authors
+                + classifier_titles
+                + classifier_tags
+                + classifier_texts
+                + classifier_urls
+            )
+
+            # Filter folder-scoped classifiers to only include those for folders containing this feed
+            if has_scoped:
+                folder_feed_map = None
+
+                def _in_folder(classifier):
+                    nonlocal folder_feed_map
+                    if getattr(classifier, "scope", "feed") != "folder":
+                        return True
+                    if folder_feed_map is None:
+                        try:
+                            usf = UserSubscriptionFolders.objects.get(user_id=self.user_id)
+                            folder_feed_map = usf.flatten_folders()
+                        except UserSubscriptionFolders.DoesNotExist:
+                            folder_feed_map = {}
+                    return self.feed_id in folder_feed_map.get(classifier.folder_name, [])
+
+                classifier_authors = [c for c in classifier_authors if _in_folder(c)]
+                classifier_titles = [c for c in classifier_titles if _in_folder(c)]
+                classifier_tags = [c for c in classifier_tags if _in_folder(c)]
+                classifier_texts = [c for c in classifier_texts if _in_folder(c)]
+                classifier_urls = [c for c in classifier_urls if _in_folder(c)]
+
+            if (
+                not len(classifier_feeds)
+                and not len(classifier_authors)
+                and not len(classifier_titles)
+                and not len(classifier_tags)
+                and not len(classifier_texts)
+                and not len(classifier_urls)
+            ):
+                if self.is_trained:
+                    logging.user(self.user, "~FB~BMTurning off is_trained, no classifiers")
+                    self.is_trained = False
+
+            # if not silent:
+            #     logging.info(' ---> [%s]    Classifiers: %s (%s)' % (self.user, datetime.datetime.now() - now, classifier_feeds.count() + classifier_authors.count() + classifier_tags.count() + classifier_titles.count()))
+
+            scores = {
+                "feed": apply_classifier_feeds(classifier_feeds, self.feed),
+            }
+
+            for story in unread_stories:
+                scores.update(
+                    {
+                        "author": apply_classifier_authors(
+                            classifier_authors, story, folder_feed_ids=folder_feed_map
+                        ),
+                        "tags": apply_classifier_tags(
+                            classifier_tags, story, folder_feed_ids=folder_feed_map
+                        ),
+                        "title": apply_classifier_titles(
+                            classifier_titles, story, folder_feed_ids=folder_feed_map
+                        ),
+                        "title_regex": 0,
+                        "text": apply_classifier_texts(
+                            classifier_texts, story, folder_feed_ids=folder_feed_map
+                        ),
+                        "text_regex": 0,
+                        "url": apply_classifier_urls(
+                            classifier_urls,
+                            story,
+                            folder_feed_ids=folder_feed_map,
+                        ),
+                        "url_regex": 0,
+                    }
+                )
+
+                max_score = max(
+                    scores["author"],
+                    scores["tags"],
+                    scores["title"],
+                    scores["title_regex"],
+                    scores["text"],
+                    scores["text_regex"],
+                    scores["url"],
+                    scores["url_regex"],
+                )
+                min_score = min(
+                    scores["author"],
+                    scores["tags"],
+                    scores["title"],
+                    scores["title_regex"],
+                    scores["text"],
+                    scores["text_regex"],
+                    scores["url"],
+                    scores["url_regex"],
+                )
+                if min_score <= -2:
+                    feed_scores["negative"] += 1  # super downvote
+                elif max_score > 0:
+                    feed_scores["positive"] += 1
+                elif min_score < 0:
+                    feed_scores["negative"] += 1
+                else:
+                    if scores["feed"] > 0:
+                        feed_scores["positive"] += 1
+                    elif scores["feed"] < 0:
+                        feed_scores["negative"] += 1
+                    else:
+                        feed_scores["neutral"] += 1
+        else:
+            unread_story_hashes = self.story_hashes(
+                user_id=self.user_id,
+                feed_ids=[self.feed_id],
+                usersubs=[self],
+                read_filter="unread",
+                include_timestamps=True,
+                cutoff_date=date_delta,
+                metrics_source="score_recalc",
+            )
+
+            feed_scores["neutral"] = len(unread_story_hashes)
+            if feed_scores["neutral"]:
+                oldest_unread_story_date = datetime.datetime.fromtimestamp(unread_story_hashes[-1][1])
+
+        if not silent or settings.DEBUG:
+            logging.user(
+                self.user,
+                "~FBUnread count (~SB%s~SN%s): ~SN(~FC%s~FB/~FC%s~FB/~FC%s~FB) ~SBto~SN (~FC%s~FB/~FC%s~FB/~FC%s~FB)"
+                % (
+                    self.feed_id,
+                    "/~FMtrained~FB" if self.is_trained else "",
+                    ong,
+                    ont,
+                    ops,
+                    feed_scores["negative"],
+                    feed_scores["neutral"],
+                    feed_scores["positive"],
+                ),
+            )
+
+        self.unread_count_positive = feed_scores["positive"]
+        self.unread_count_neutral = feed_scores["neutral"]
+        self.unread_count_negative = feed_scores["negative"]
+        self.unread_count_updated = datetime.datetime.now()
+        self.oldest_unread_story_date = oldest_unread_story_date
+        self.needs_unread_recalc = False
+
+        update_fields = []
+        if self.unread_count_positive != ops:
+            update_fields.append("unread_count_positive")
+        if self.unread_count_neutral != ont:
+            update_fields.append("unread_count_neutral")
+        if self.unread_count_negative != ong:
+            update_fields.append("unread_count_negative")
+        if self.unread_count_updated != ucu:
+            update_fields.append("unread_count_updated")
+        if self.oldest_unread_story_date != oousd:
+            update_fields.append("oldest_unread_story_date")
+        if self.is_trained != oit:
+            update_fields.append("is_trained")
+        if len(update_fields):
+            update_dict = {field: getattr(self, field) for field in update_fields}
+            # Write the counts only if no story was marked read while we were
+            # recomputing: mark_story_ids_as_read and mark_feed_read both advance
+            # last_read_date, and counts computed against the pre-read snapshot
+            # would overwrite the mark-read's zeros with stale numbers -- a badge
+            # with no unread stories behind it. When the write is rejected, leave
+            # the recalc flag set so the next recount runs from fresh state.
+            if not UserSubscription.objects.filter(pk=self.pk, last_read_date=olrd).update(**update_dict):
+                UserSubscription.objects.filter(pk=self.pk).update(needs_unread_recalc=True)
+                self.needs_unread_recalc = True
+                return self
+
+        # Clear needs_unread_recalc only if no story was marked read while we were
+        # recomputing. mark_story_ids_as_read advances last_read_date (and sets the
+        # flag); if it moved since our snapshot, a read raced the count above, which
+        # is now stale. Leave the flag set so the next recount produces the correct
+        # number instead of clobbering the flag with a stale count (a lost-update
+        # race that otherwise leaves a permanently wrong, "clean" unread count).
+        if onur and not self.needs_unread_recalc:
+            cleared = UserSubscription.objects.filter(pk=self.pk, last_read_date=olrd).update(
+                needs_unread_recalc=False
+            )
+            if not cleared:
+                self.needs_unread_recalc = True
+
+        if self.unread_count_positive == 0 and self.unread_count_neutral == 0:
+            self.mark_feed_read()
+
+        if not silent:
+            logging.user(
+                self.user,
+                "~FC~SNComputing scores: %s (~SB%s~SN/~SB%s~SN/~SB%s~SN)"
+                % (self.feed, feed_scores["negative"], feed_scores["neutral"], feed_scores["positive"]),
+            )
+
+        self.trim_read_stories()
+
+        return self
+
+    @staticmethod
+    def score_story(scores):
+        # AI prompt classifier takes absolute priority
+        prompt = scores.get("prompt", 0)
+        if prompt != 0:
+            return prompt
+
+        max_score = max(
+            scores["author"],
+            scores.get("author_regex", 0),
+            scores["tags"],
+            scores["title"],
+            scores.get("title_regex", 0),
+            scores.get("text", 0),
+            scores.get("text_regex", 0),
+            scores.get("url", 0),
+            scores.get("url_regex", 0),
+        )
+        min_score = min(
+            scores["author"],
+            scores.get("author_regex", 0),
+            scores["tags"],
+            scores["title"],
+            scores.get("title_regex", 0),
+            scores.get("text", 0),
+            scores.get("text_regex", 0),
+            scores.get("url", 0),
+            scores.get("url_regex", 0),
+        )
+
+        if min_score <= -2:
+            return min_score  # super downvote wins; keep -2 so clients can tell it from a -1 dislike
+        elif max_score > 0:
+            return 1
+        elif min_score < 0:
+            return -1
+
+        return scores["feed"]
+
+    def switch_feed(self, new_feed, old_feed):
+        # A reader with no folder row still has a subscription to move. Returning early here
+        # left the subscription on the old feed, and merge_feeds then deleted it along with
+        # that feed (forum #13830). The folder rewrite below is skipped for them instead.
+        user_sub_folders = UserSubscriptionFolders.objects.filter(user=self.user).first()
+        if user_sub_folders is None:
+            logging.info(
+                " ***> %s has no folder row, moving the subscription without a folder rewrite" % self.user
+            )
+
+        logging.info("      ===> %s " % self.user)
+
+        # Switch read stories
+        RUserStory.switch_feed(user_id=self.user_id, old_feed_id=old_feed.pk, new_feed_id=new_feed.pk)
+        RUserUnreadStory.switch_feed(user_id=self.user_id, old_feed_id=old_feed.pk, new_feed_id=new_feed.pk)
+
+        def switch_feed_for_classifier(model):
+            duplicates = model.objects(feed_id=old_feed.pk, user_id=self.user_id)
+            if duplicates.count():
+                logging.info(" ---> Switching %s %s" % (duplicates.count(), model))
+            for duplicate in duplicates:
+                duplicate.feed_id = new_feed.pk
+                if duplicate.social_user_id is None:
+                    duplicate.social_user_id = 0
+                try:
+                    duplicate.save()
+                except DatabaseError:
+                    # utils/documents aliases OperationError to DatabaseError and
+                    # IntegrityError subclasses it, so one handler covers both.
+                    logging.info("      !!!!> %s already exists" % duplicate)
+                    duplicate.delete()
+
+        switch_feed_for_classifier(MClassifierTitle)
+        switch_feed_for_classifier(MClassifierAuthor)
+        switch_feed_for_classifier(MClassifierFeed)
+        switch_feed_for_classifier(MClassifierTag)
+        switch_feed_for_classifier(MClassifierText)
+
+        # Folders first, then the subscription row: if the merge stops between the two, the
+        # reader is still found under the old feed on the next run and the rewrite repeats
+        # harmlessly; the other order would strand a moved subscription without a sidebar entry.
+        if user_sub_folders is not None:
+            user_sub_folders.rewrite_feed(new_feed, old_feed)
+
+        # Switch to original feed for the user subscription
+        self.feed = new_feed
+        self.needs_unread_recalc = True
+        try:
+            existing_sub = UserSubscription.objects.get(user=self.user, feed=new_feed)
+        except UserSubscription.DoesNotExist:
+            self.save()
+        else:
+            # User is subscribed to both feeds - merge metadata before deleting duplicate
+            logging.info("      !!!!> %s already subscribed, merging metadata" % self.user)
+
+            # Preserve active status: if either subscription is active, keep it active
+            if self.active and not existing_sub.active:
+                existing_sub.active = True
+
+            if self.user_title and not existing_sub.user_title:
+                existing_sub.user_title = self.user_title
+
+            # Sum feed_opens to preserve engagement history
+            existing_sub.feed_opens += self.feed_opens
+
+            # Use the more recent read dates
+            if self.last_read_date and (
+                not existing_sub.last_read_date or self.last_read_date > existing_sub.last_read_date
+            ):
+                existing_sub.last_read_date = self.last_read_date
+            if self.mark_read_date and (
+                not existing_sub.mark_read_date or self.mark_read_date > existing_sub.mark_read_date
+            ):
+                existing_sub.mark_read_date = self.mark_read_date
+
+            # Preserve training status
+            if self.is_trained:
+                existing_sub.is_trained = True
+
+            existing_sub.needs_unread_recalc = True
+            existing_sub.save()
+            self.delete()
+
+    @classmethod
+    def all_subs_needs_unread_recalc(cls, user_id):
+        subs = cls.objects.filter(user=user_id)
+        total = len(subs)
+        needed_recalc = 0
+        for sub in subs:
+            if not sub.needs_unread_recalc:
+                sub.needs_unread_recalc = True
+                sub.save()
+                needed_recalc += 1
+
+        logging.debug(f" ---> Relcaculated {needed_recalc} of {total} subscriptions for user_id: {user_id}")
+
+    @classmethod
+    def verify_feeds_scheduled(cls, user_id):
+        r = redis.Redis(connection_pool=settings.REDIS_FEED_UPDATE_POOL)
+        user = User.objects.get(pk=user_id)
+        subs = cls.objects.filter(user=user)
+        feed_ids = [sub.feed.pk for sub in subs]
+
+        p = r.pipeline()
+        for feed_id in feed_ids:
+            p.zscore("scheduled_updates", feed_id)
+            p.zscore("error_feeds", feed_id)
+        results = p.execute()
+
+        p = r.pipeline()
+        for feed_id in feed_ids:
+            p.zscore("queued_feeds", feed_id)
+        try:
+            results_queued = p.execute()
+        except:
+            results_queued = [False for x in range(len(feed_ids))]
+
+        safety_net = []
+        for f, feed_id in enumerate(feed_ids):
+            scheduled_updates = results[f * 2]
+            error_feeds = results[f * 2 + 1]
+            queued_feeds = results_queued[f]
+            if not scheduled_updates and not queued_feeds and not error_feeds:
+                safety_net.append(feed_id)
+
+        if not safety_net:
+            return
+
+        logging.user(user, "~FBFound ~FR%s unscheduled feeds~FB, scheduling immediately..." % len(safety_net))
+        for feed_id in safety_net:
+            feed = Feed.get_by_id(feed_id)
+            feed.schedule_feed_fetch_immediately()
+
+        # return cofeeds
+
+class RUserStory:
+    @classmethod
+    def mark_story_hashes_read(cls, user_id, story_hashes, username=None, r=None, s=None):
+        if not r:
+            r = redis.Redis(connection_pool=settings.REDIS_STORY_HASH_POOL)
+        if not s:
+            s = redis.Redis(connection_pool=settings.REDIS_POOL)
+        ps = redis.Redis(connection_pool=settings.REDIS_PUBSUB_POOL)
+        if not username:
+            username = User.objects.get(pk=user_id).username
+
+        p = r.pipeline()
+        feed_ids = set()
+        friend_ids = set()
+
+        if not isinstance(story_hashes, list):
+            story_hashes = [story_hashes]
+
+        single_story = len(story_hashes) == 1
+
+        for story_hash in story_hashes:
+            feed_id, _ = MStory.split_story_hash(story_hash)
+            feed_ids.add(feed_id)
+
+            if single_story:
+                cls.aggregate_mark_read(feed_id)
+
+            # Find other social feeds with this story to update their counts
+            friend_key = "F:%s:F" % (user_id)
+            share_key = "S:%s" % (story_hash)
+            friends_with_shares = [int(f) for f in s.sinter(share_key, friend_key)]
+            friend_ids.update(friends_with_shares)
+            cls.mark_read(
+                user_id,
+                feed_id,
+                story_hash,
+                social_user_ids=friends_with_shares,
+                r=p,
+                username=username,
+                ps=ps,
+            )
+
+        p.execute()
+
+        return list(feed_ids), list(friend_ids)
+
+    @classmethod
+    def mark_story_hash_unread(cls, user, story_hash, r=None, s=None, ps=None):
+        if not r:
+            r = redis.Redis(connection_pool=settings.REDIS_STORY_HASH_POOL)
+        if not s:
+            s = redis.Redis(connection_pool=settings.REDIS_POOL)
+        if not ps:
+            ps = redis.Redis(connection_pool=settings.REDIS_PUBSUB_POOL)
+
+        friend_ids = set()
+        feed_id, _ = MStory.split_story_hash(story_hash)
+
+        # Find other social feeds with this story to update their counts
+        friend_key = "F:%s:F" % (user.pk)
+        share_key = "S:%s" % (story_hash)
+        friends_with_shares = [int(f) for f in s.sinter(share_key, friend_key)]
+        friend_ids.update(friends_with_shares)
+        cls.mark_unread(
+            user.pk,
+            feed_id,
+            story_hash,
+            social_user_ids=friends_with_shares,
+            r=r,
+            username=user.username,
+            ps=ps,
+        )
+
+        return feed_id, list(friend_ids)
+
+    @classmethod
+    def aggregate_mark_read(cls, feed_id):
+        if not feed_id:
+            logging.debug(" ***> ~BR~FWNo feed_id on aggregate mark read. Ignoring.")
+            return
+
+        r = redis.Redis(connection_pool=settings.REDIS_FEED_READ_POOL)
+        week_of_year = datetime.datetime.now().strftime("%Y-%U")
+        feed_read_key = "fR:%s:%s" % (feed_id, week_of_year)
+
+        r.incr(feed_read_key)
+        # This settings.DAYS_OF_STORY_HASHES doesn't need to consider potential pro subscribers
+        # because the feed_read_key is really only used for statistics and not unreads
+        r.expire(feed_read_key, 2 * settings.DAYS_OF_STORY_HASHES * 24 * 60 * 60)
+
+    @classmethod
+    def mark_read(
+        cls,
+        user_id,
+        story_feed_id,
+        story_hash,
+        social_user_ids=None,
+        aggregated=False,
+        r=None,
+        username=None,
+        ps=None,
+    ):
+        if not r:
+            r = redis.Redis(connection_pool=settings.REDIS_STORY_HASH_POOL)
+
+        story_hash = MStory.ensure_story_hash(story_hash, story_feed_id=story_feed_id)
+
+        if not story_hash:
+            return
+
+        # apps/reader/models.py: a caller with a raw story id but no feed gets a "None:abc123"
+        # hash out of ensure_story_hash. It can never match a story, so it would only pollute
+        # RS:<user> and RS:<user>:None. Take the feed from the hash and drop the write when the
+        # hash carries none.
+        feed_id, _ = MStory.split_story_hash(story_hash)
+        if not feed_id:
+            return
+
+        def redis_commands(key):
+            r.sadd(key, story_hash)
+            r.expire(key, Feed.days_of_story_hashes_for_feed(feed_id) * 24 * 60 * 60)
+
+        all_read_stories_key = "RS:%s" % (user_id)
+        redis_commands(all_read_stories_key)
+
+        read_story_key = "RS:%s:%s" % (user_id, feed_id)
+        redis_commands(read_story_key)
+
+        if ps and username:
+            ps.publish(username, "story:read:%s" % story_hash)
+
+        if social_user_ids:
+            for social_user_id in social_user_ids:
+                social_read_story_key = "RS:%s:B:%s" % (user_id, social_user_id)
+                redis_commands(social_read_story_key)
+
+        # Don't remove unread stories from zU because users are actively paging through
+        # unread_stories_key = f"U:{user_id}:{story_feed_id}"
+        # unread_ranked_stories_key = f"zU:{user_id}:{story_feed_id}"
+        # r.srem(unread_stories_key, story_hash)
+        # r.zrem(unread_ranked_stories_key, story_hash)
+
+        if not aggregated:
+            key = "lRS:%s" % user_id
+            r.lpush(key, story_hash)
+            r.ltrim(key, 0, 1000)
+            r.expire(key, Feed.days_of_story_hashes_for_feed(feed_id) * 24 * 60 * 60)
+
+    @staticmethod
+    def story_can_be_marked_unread_by_user(story, user):
+        message = None
+        if story.story_date < user.profile.unread_cutoff:
+            message = "Stories older than %s days cannot be marked unread." % (settings.DAYS_OF_UNREAD)
+        return message
+
+    @staticmethod
+    def mark_unread(user_id, story_feed_id, story_hash, social_user_ids=None, r=None, username=None, ps=None):
+        if not r:
+            r = redis.Redis(connection_pool=settings.REDIS_STORY_HASH_POOL)
+
+        story_hash = MStory.ensure_story_hash(story_hash, story_feed_id=story_feed_id)
+
+        if not story_hash:
+            return
+
+        # apps/reader/models.py: same guard as mark_read, so an unattributable hash never reaches
+        # RS:<user>:None.
+        feed_id, _ = MStory.split_story_hash(story_hash)
+        if not feed_id:
+            return
+
+        def redis_commands(key):
+            r.srem(key, story_hash)
+            r.expire(key, Feed.days_of_story_hashes_for_feed(feed_id) * 24 * 60 * 60)
+
+        all_read_stories_key = "RS:%s" % (user_id)
+        redis_commands(all_read_stories_key)
+
+        read_story_key = "RS:%s:%s" % (user_id, feed_id)
+        redis_commands(read_story_key)
+
+        read_stories_list_key = "lRS:%s" % user_id
+        r.lrem(read_stories_list_key, 1, story_hash)
+
+        if ps and username:
+            ps.publish(username, "story:unread:%s" % story_hash)
+
+        if social_user_ids:
+            for social_user_id in social_user_ids:
+                social_read_story_key = "RS:%s:B:%s" % (user_id, social_user_id)
+                redis_commands(social_read_story_key)
+
+    @staticmethod
+    def get_stories(user_id, feed_id, r=None):
+        if not r:
+            r = redis.Redis(connection_pool=settings.REDIS_STORY_HASH_POOL)
+        story_hashes = r.smembers("RS:%s:%s" % (user_id, feed_id))
+        return story_hashes
+
+    @staticmethod
+    def iter_read_story_hashes(user_id, batch_size=1000):
+        """Yields batches of every read story hash that still exists for a feed.
+
+        RS:<user> is the unbounded set that trim_read_stories() keeps in sync with
+        the stories table. lRS:<user> is capped at 1,001 entries and only preserves
+        read order, so it cannot answer a search over an older read history.
+        SSCAN may return a hash more than once; callers deduplicate.
+        """
+        r = redis.Redis(connection_pool=settings.REDIS_STORY_HASH_POOL)
+        key = "RS:%s" % user_id
+        cursor = 0
+        while True:
+            cursor, values = r.sscan(key, cursor=cursor, count=batch_size)
+            if values:
+                yield [
+                    value.decode("utf-8", "replace") if isinstance(value, bytes) else value
+                    for value in values
+                ]
+            if cursor == 0:
+                break
+
+    @staticmethod
+    def get_read_stories(
+        user_id, offset=0, limit=12, order="newest", date_filter_start=None, date_filter_end=None
+    ):
+        r = redis.Redis(connection_pool=settings.REDIS_STORY_HASH_POOL)
+        key = "lRS:%s" % user_id
+
+        # If date filtering is required, create a temporary sorted set and use zremrangebyscore
+        if date_filter_start or date_filter_end:
+            logging.debug(f"Applying date filter: {date_filter_start} - {date_filter_end}")
+
+            import time
+
+            from apps.rss_feeds.models import MStory
+
+            # Get all story hashes from the list
+            all_hashes = r.lrange(key, 0, -1)
+
+            if not all_hashes:
+                return []
+
+            # Fetch story dates from MongoDB
+            mstories = MStory.objects(story_hash__in=all_hashes).only("story_hash", "story_date").order_by()
+            story_dates = {}
+            for story in mstories:
+                if story.story_date:
+                    story_date = story.story_date
+                    # Ensure story_date is naive for timestamp conversion
+                    if story_date.tzinfo:
+                        story_date = story_date.replace(tzinfo=None)
+                    story_dates[story.story_hash] = int(time.mktime(story_date.timetuple()))
+
+            # Create temporary sorted set with story_date as score
+            temp_key = "zT:RS:%s" % user_id
+            pipeline = r.pipeline()
+
+            # Add stories to sorted set with their dates as scores
+            for story_hash in all_hashes:
+                if story_hash in story_dates:
+                    pipeline.zadd(temp_key, {story_hash: story_dates[story_hash]})
+
+            pipeline.expire(temp_key, 60 * 60)  # 1 hour TTL
+            pipeline.execute()
+
+            # Apply date filtering with zremrangebyscore
+            if date_filter_start:
+                start_score = int(time.mktime(date_filter_start.timetuple()))
+                r.zremrangebyscore(temp_key, "-inf", start_score - 1)
+
+            if date_filter_end:
+                end_score = int(time.mktime(date_filter_end.timetuple()))
+                r.zremrangebyscore(temp_key, end_score, "+inf")
+
+            # Retrieve filtered results
+            if order == "oldest":
+                story_hashes = r.zrange(temp_key, offset, offset + limit - 1)
+            else:  # newest
+                story_hashes = r.zrevrange(temp_key, offset, offset + limit - 1)
+
+            # Clean up temp key
+            r.delete(temp_key)
+
+            return story_hashes
+        else:
+            # Original behavior without date filtering
+            if order == "oldest":
+                count = r.llen(key)
+                if offset >= count:
+                    return []
+                offset = max(0, count - (offset + limit))
+                story_hashes = r.lrange(key, offset, offset + limit)
+            elif order == "newest":
+                story_hashes = r.lrange(key, offset, offset + limit)
+
+        return story_hashes
+
+    @classmethod
+    def switch_feed(cls, user_id, old_feed_id, new_feed_id):
+        r = redis.Redis(connection_pool=settings.REDIS_STORY_HASH_POOL)
+        p = r.pipeline()
+
+        # The reader's actual read set for the old feed. UserSubscription.story_hashes with
+        # its default read_filter="unread" listed the *unread* stories here, which marked
+        # them read on the new feed and dropped the real read state (merge_feeds, #2133).
+        story_hashes = [
+            story_hash.decode() if isinstance(story_hash, bytes) else story_hash
+            for story_hash in cls.get_stories(user_id, old_feed_id, r=r)
+        ]
+
+        # One expiry lookup (it queries Postgres) for the whole set, and the pipeline flushed
+        # in bounded batches: a long-time reader can have tens of thousands of read hashes.
+        expire_seconds = Feed.days_of_story_hashes_for_feed(new_feed_id) * 24 * 60 * 60
+        read_feed_key = "RS:%s:%s" % (user_id, new_feed_id)
+        read_user_key = "RS:%s" % (user_id)
+        for index, story_hash in enumerate(story_hashes, 1):
+            _, hash_story = MStory.split_story_hash(story_hash)
+            if not hash_story:
+                continue
+            new_story_hash = "%s:%s" % (new_feed_id, hash_story)
+            p.sadd(read_feed_key, new_story_hash)
+            p.sadd(read_user_key, new_story_hash)
+            if index % 1000 == 0:
+                # Expiry rides with every batch so a set created by an early batch never
+                # outlives its feed if the worker stops before the last one.
+                p.expire(read_feed_key, expire_seconds)
+                p.expire(read_user_key, expire_seconds)
+                p.execute()
+        if story_hashes:
+            p.expire(read_feed_key, expire_seconds)
+            p.expire(read_user_key, expire_seconds)
+        p.execute()
+
+        if len(story_hashes) > 0:
+            logging.info(" ---> %s read stories" % len(story_hashes))
+
+    @classmethod
+    def switch_hash(cls, feed, old_hash, new_hash):
+        r = redis.Redis(connection_pool=settings.REDIS_STORY_HASH_POOL)
+        p = r.pipeline()
+
+        usersubs = UserSubscription.objects.filter(feed_id=feed.pk, last_read_date__gte=feed.unread_cutoff)
+        logging.info(" ---> ~SB%s usersubs~SN to switch read story hashes..." % len(usersubs))
+        for sub in usersubs:
+            # One story of a popular feed can outlast the fetch lease in here; keep the lock
+            # the fetch holds on the feed, or stop before writing under a lost one. A no-op
+            # outside a lock. apps/reader/models.py
+            renew_merge_feeds_locks()
+            rs_key = "RS:%s:%s" % (sub.user.pk, feed.pk)
+            read = r.sismember(rs_key, old_hash)
+            if read:
+                p.sadd(rs_key, new_hash)
+                p.expire(rs_key, feed.days_of_story_hashes * 24 * 60 * 60)
+
+                read_user_key = "RS:%s" % sub.user.pk
+                p.sadd(read_user_key, new_hash)
+                p.expire(read_user_key, feed.days_of_story_hashes * 24 * 60 * 60)
+
+        p.execute()
+
+    @classmethod
+    def read_story_count(cls, user_id):
+        r = redis.Redis(connection_pool=settings.REDIS_STORY_HASH_POOL)
+        key = "RS:%s" % user_id
+        count = r.scard(key)
+        return count
+
+class UserSubscriptionFolders(models.Model):
+    """
+    A JSON list of folders and feeds for while a user has subscribed. The list
+    is a recursive descent of feeds and folders in folders. Used to layout
+    the feeds and folders in the Reader's feed navigation pane.
+    """
+
+    user = models.OneToOneField(User, on_delete=models.CASCADE)
+    folders = models.TextField(default="[]")
+
+    def __str__(self):
+        return "[%s]: %s" % (
+            self.user,
+            len(self.folders),
+        )
+
+    class Meta:
+        verbose_name_plural = "folders"
+        verbose_name = "folder"
+
+    @classmethod
+    def compact_for_user(cls, user_id):
+        user = User.objects.get(pk=user_id)
+        try:
+            usf = UserSubscriptionFolders.objects.get(user=user)
+        except UserSubscriptionFolders.DoesNotExist:
+            return
+
+        usf.compact()
+
+    @classmethod
+    def get_feed_folder_mapping(cls, user):
+        """Returns dict mapping feed_id -> list of folder titles for all feeds.
+
+        This is used to avoid N+1 queries when calculating auto_mark_read cutoffs
+        for multiple feeds in a loop.
+        """
+        try:
+            usf = cls.objects.get(user=user)
+            flat_folders = usf.flatten_folders()
+            feed_to_folders = {}
+            for folder_title, feed_ids in flat_folders.items():
+                folder_title = folder_title.strip() if folder_title else ""
+                for feed_id in feed_ids:
+                    if feed_id not in feed_to_folders:
+                        feed_to_folders[feed_id] = []
+                    feed_to_folders[feed_id].append(folder_title)
+            return feed_to_folders
+        except cls.DoesNotExist:
+            return {}
+
+    def compact(self):
+        folders = json.decode(self.folders)
+
+        def _compact(folder):
+            new_folder = []
+            for item in folder:
+                if isinstance(item, int) and item not in new_folder:
+                    new_folder.append(item)
+                elif isinstance(item, dict):
+                    for f_k, f_v in list(item.items()):
+                        # Check every existing folder at that level to see if it already exists
+                        for ef, existing_folder in enumerate(new_folder):
+                            if type(existing_folder) == dict and list(existing_folder.keys())[0] == f_k:
+                                existing_folder_feed_ids = [
+                                    f for f in list(existing_folder.values())[0] if type(f) == int
+                                ]
+                                merged = []
+                                for merge_val in existing_folder_feed_ids:
+                                    merged.append(merge_val)
+                                for merge_val in f_v:
+                                    if type(merge_val) == int:
+                                        if merge_val not in existing_folder_feed_ids:
+                                            merged.append(merge_val)
+                                    else:
+                                        merged.append(merge_val)
+                                if f_v != existing_folder_feed_ids:
+                                    logging.info(
+                                        f" ---> ~FRFound repeat folder: {f_k} \n\t"
+                                        f"~FBExisting: {f_v}\n\t"
+                                        f"~FCMerging: {list(existing_folder.values())[0]}\n\t"
+                                        f"~FYBecomes: {merged}"
+                                    )
+                                    new_folder[ef] = {f_k: _compact(merged)}
+                                else:
+                                    logging.info(
+                                        f" ---> ~FRFound repeat folder ~FY{f_k}~FR, no difference in feeds"
+                                    )
+                                break
+                        else:
+                            # If no match, then finally we can add the folder
+                            new_folder.append({f_k: _compact(f_v)})
+            return new_folder
+
+        new_folders = _compact(folders)
+        compact_msg = " ---> Compacting from %s to %s" % (folders, new_folders)
+        new_folders = json.encode(new_folders)
+        if json.encode(self.folders) != json.encode(new_folders):
+            logging.info(compact_msg)
+            logging.info(" ---> Compacting from %s bytes to %s bytes" % (len(self.folders), len(new_folders)))
+            self.folders = new_folders
+            self.save()
+
+    def add_folder(self, parent_folder, folder):
+        if self.folders:
+            user_sub_folders = json.decode(self.folders)
+        else:
+            user_sub_folders = []
+        obj = {folder: []}
+        user_sub_folders = add_object_to_folder(obj, parent_folder, user_sub_folders)
+        self.folders = json.encode(user_sub_folders)
+        self.save()
+
+    def arranged_folders(self):
+        user_sub_folders = json.decode(self.folders)
+
+        def _arrange_folder(folder):
+            folder_feeds = []
+            folder_folders = []
+            for item in folder:
+                if isinstance(item, int):
+                    folder_feeds.append(item)
+                elif isinstance(item, dict):
+                    for f_k, f_v in list(item.items()):
+                        arranged_folder = _arrange_folder(f_v)
+                        folder_folders.append({f_k: arranged_folder})
+
+            arranged_folder = folder_feeds + folder_folders
+            return arranged_folder
+
+        return _arrange_folder(user_sub_folders)
+
+    def flatten_folders(self, feeds=None, inactive_feeds=None):
+        folders = json.decode(self.folders)
+        flat_folders = {" ": []}
+        if feeds and not inactive_feeds:
+            inactive_feeds = []
+
+        def _flatten_folders(items, parent_folder="", depth=0):
+            for item in items:
+                if isinstance(item, int) and (not feeds or (item in feeds or item in inactive_feeds)):
+                    if not parent_folder:
+                        parent_folder = " "
+                    if parent_folder in flat_folders:
+                        flat_folders[parent_folder].append(item)
+                    else:
+                        flat_folders[parent_folder] = [item]
+                elif isinstance(item, dict):
+                    for folder_name in item:
+                        folder = item[folder_name]
+                        flat_folder_name = "%s%s%s" % (
+                            parent_folder if parent_folder and parent_folder != " " else "",
+                            " - " if parent_folder and parent_folder != " " else "",
+                            folder_name,
+                        )
+                        flat_folders[flat_folder_name] = []
+                        _flatten_folders(folder, flat_folder_name, depth + 1)
+
+        _flatten_folders(folders)
+
+        return flat_folders
+
+    def find_feed_folders(self, feed_id):
+        """Find the folder(s) containing a feed. Returns a list of folder paths.
+
+        Note: flatten_folders() returns full nested paths like "Parent - Child - Grandchild".
+        This method returns the full path so that _resolve_folder_auto_mark_read can walk up
+        the hierarchy to find inherited folder settings.
+        """
+        flat_folders = self.flatten_folders()
+        folders_with_feed = []
+        for folder_title, feed_ids in flat_folders.items():
+            if feed_id in feed_ids:
+                folder_title = folder_title.strip() if folder_title else ""
+                folders_with_feed.append(folder_title)
+        return folders_with_feed
+
+    def delete_feed(self, feed_id, in_folder, commit_delete=True):
+        feed_id = int(feed_id)
+        explicit_path = isinstance(in_folder, list)
+        if explicit_path:
+            resolve_folder_path(json.decode(self.folders), in_folder)
+
+        # apps/reader/models.py
+        # Count every placement of the feed and note whether any sits directly in the
+        # folder the client asked us to delete from. A stale, renamed, or duplicated
+        # in_folder used to make this a silent no-op: the feed was neither removed from
+        # the tree nor unsubscribed, so it "came back" on the next load. Instead we
+        # always remove exactly one placement (falling back to the first one found when
+        # the requested folder doesn't match), and only unsubscribe when that was the
+        # feed's last remaining placement.
+        def _count_feed(old_folders, folder_name=""):
+            total = 0
+            in_requested = False
+            for folder in old_folders:
+                if isinstance(folder, int):
+                    if folder == feed_id:
+                        total += 1
+                        if in_folder is not None and in_folder == folder_name:
+                            in_requested = True
+                elif isinstance(folder, dict):
+                    for f_k, f_v in list(folder.items()):
+                        sub_total, sub_in = _count_feed(f_v, folder_name + [f_k] if explicit_path else f_k)
+                        total += sub_total
+                        in_requested = in_requested or sub_in
+            return total, in_requested
+
+        arranged = self.arranged_folders()
+        total_occurrences, occurrence_in_requested = _count_feed(arranged, [] if explicit_path else "")
+
+        # Honor the requested folder only when the feed actually lives there; otherwise
+        # remove the first placement anywhere so a mismatched in_folder can't leave the
+        # feed stuck and subscribed.
+        if explicit_path and not occurrence_in_requested:
+            raise InvalidFolderPath("That feed is no longer in the selected folder. Refresh and try again.")
+        target_folder = in_folder if (in_folder is not None and occurrence_in_requested) else None
+        removal = {"deleted": False}
+
+        def _remove_one(old_folders, folder_name=""):
+            new_folders = []
+            for folder in old_folders:
+                if isinstance(folder, int):
+                    if (
+                        folder == feed_id
+                        and not removal["deleted"]
+                        and (target_folder is None or target_folder == folder_name)
+                    ):
+                        removal["deleted"] = True
+                        logging.user(
+                            self.user, "~FBDelete feed: %s from folder '%s'" % (feed_id, folder_name)
+                        )
+                        continue
+                    new_folders.append(folder)
+                elif isinstance(folder, dict):
+                    for f_k, f_v in list(folder.items()):
+                        new_folders.append(
+                            {f_k: _remove_one(f_v, folder_name + [f_k] if explicit_path else f_k)}
+                        )
+            return new_folders
+
+        user_sub_folders = _remove_one(arranged, [] if explicit_path else "")
+        self.folders = json.encode(user_sub_folders)
+        self.save()
+
+        deleted = removal["deleted"]
+        multiples_found = total_occurrences > 1
+
+        if not multiples_found and deleted and commit_delete:
+            user_sub = None
+            try:
+                user_sub = UserSubscription.objects.get(user=self.user, feed=feed_id)
+            except (Feed.DoesNotExist, UserSubscription.DoesNotExist):
+                duplicate_feed = DuplicateFeed.objects.filter(duplicate_feed_id=feed_id)
+                if duplicate_feed:
+                    try:
+                        user_sub = UserSubscription.objects.get(user=self.user, feed=duplicate_feed[0].feed)
+                    except (Feed.DoesNotExist, UserSubscription.DoesNotExist):
+                        return
+            if user_sub:
+                user_sub.delete()
+
+    def delete_folder(self, folder_to_delete, in_folder, feed_ids_in_folder, commit_delete=True):
+        explicit_path = isinstance(in_folder, list)
+        if explicit_path:
+            destination = resolve_folder_path(json.decode(self.folders), in_folder)
+            target_name = folder_to_delete
+            if not any(isinstance(item, dict) and target_name in item for item in destination):
+                raise InvalidFolderPath("That folder has changed. Refresh and try again.")
+
+        def _find_folder_in_folders(old_folders, folder_name, feeds_to_delete, deleted_folder=None):
+            new_folders = []
+            for k, folder in enumerate(old_folders):
+                if isinstance(folder, int):
+                    new_folders.append(folder)
+                    if folder in feeds_to_delete:
+                        feeds_to_delete.remove(folder)
+                elif isinstance(folder, dict):
+                    for f_k, f_v in list(folder.items()):
+                        if f_k == folder_to_delete and (in_folder == folder_name or in_folder is None):
+                            logging.user(
+                                self.user,
+                                "~FBDeleting folder '~SB%s~SN' in '%s': %s" % (f_k, folder_name, folder),
+                            )
+                            deleted_folder = folder
+                        else:
+                            nf, feeds_to_delete, deleted_folder = _find_folder_in_folders(
+                                f_v,
+                                folder_name + [f_k] if explicit_path else f_k,
+                                feeds_to_delete,
+                                deleted_folder,
+                            )
+                            new_folders.append({f_k: nf})
+
+            return new_folders, feeds_to_delete, deleted_folder
+
+        user_sub_folders = json.decode(self.folders)
+        user_sub_folders, feeds_to_delete, deleted_folder = _find_folder_in_folders(
+            user_sub_folders, [] if explicit_path else "", feed_ids_in_folder
+        )
+        self.folders = json.encode(user_sub_folders)
+        self.save()
+
+        if commit_delete:
+            UserSubscription.objects.filter(user=self.user, feed__in=feeds_to_delete).delete()
+
+        return deleted_folder
+
+    def delete_feeds_by_folder(self, feeds_by_folder):
+        logging.user(
+            self.user, "~FBDeleting ~FR~SB%s~SN feeds~FB: ~SB%s" % (len(feeds_by_folder), feeds_by_folder)
+        )
+        for feed_id, in_folder in feeds_by_folder:
+            self.delete_feed(feed_id, in_folder)
+
+        return self
+
+    def rename_folder(self, folder_to_rename, new_folder_name, in_folder):
+        explicit_path = isinstance(in_folder, list)
+        if explicit_path:
+            destination = resolve_folder_path(json.decode(self.folders), in_folder)
+            target_name = folder_to_rename
+            if not any(isinstance(item, dict) and target_name in item for item in destination):
+                raise InvalidFolderPath("That folder has changed. Refresh and try again.")
+
+        def _find_folder_in_folders(old_folders, folder_name):
+            new_folders = []
+            for k, folder in enumerate(old_folders):
+                if isinstance(folder, int):
+                    new_folders.append(folder)
+                elif isinstance(folder, dict):
+                    for f_k, f_v in list(folder.items()):
+                        nf = _find_folder_in_folders(f_v, folder_name + [f_k] if explicit_path else f_k)
+                        if f_k == folder_to_rename and in_folder == folder_name:
+                            logging.user(
+                                self.user,
+                                "~FBRenaming folder '~SB%s~SN' in '%s' to: ~SB%s"
+                                % (f_k, folder_name, new_folder_name),
+                            )
+                            f_k = new_folder_name
+                        new_folders.append({f_k: nf})
+
+            return new_folders
+
+        user_sub_folders = json.decode(self.folders)
+        user_sub_folders = _find_folder_in_folders(user_sub_folders, [] if explicit_path else "")
+        self.folders = json.encode(user_sub_folders)
+        self.save()
+
+    def move_feed_to_folders(self, feed_id, in_folders=None, to_folders=None):
+        logging.user(
+            self.user, "~FBMoving feed '~SB%s~SN' in '%s' to: ~SB%s" % (feed_id, in_folders, to_folders)
+        )
+        user_sub_folders = json.decode(self.folders)
+        for path in to_folders:
+            if isinstance(path, list):
+                resolve_folder_path(user_sub_folders, path)
+        for path in in_folders:
+            if isinstance(path, list) and int(feed_id) not in resolve_folder_path(user_sub_folders, path):
+                raise InvalidFolderPath("That feed has moved. Refresh and try again.")
+        for in_folder in in_folders:
+            self.delete_feed(feed_id, in_folder, commit_delete=False)
+        user_sub_folders = json.decode(self.folders)
+        for to_folder in to_folders:
+            user_sub_folders = add_object_to_folder(int(feed_id), to_folder, user_sub_folders)
+        self.folders = json.encode(user_sub_folders)
+        self.save()
+
+        return self
+
+    def move_feed_to_folder(self, feed_id, in_folder=None, to_folder=None):
+        logging.user(
+            self.user, "~FBMoving feed '~SB%s~SN' in '%s' to: ~SB%s" % (feed_id, in_folder, to_folder)
+        )
+        user_sub_folders = json.decode(self.folders)
+        self.delete_feed(feed_id, in_folder, commit_delete=False)
+        user_sub_folders = json.decode(self.folders)
+        user_sub_folders = add_object_to_folder(int(feed_id), to_folder, user_sub_folders)
+        self.folders = json.encode(user_sub_folders)
+        self.save()
+
+        return self
+
+    def move_folder_to_folder(self, folder_name, in_folder=None, to_folder=None):
+        logging.user(
+            self.user, "~FBMoving folder '~SB%s~SN' in '%s' to: ~SB%s" % (folder_name, in_folder, to_folder)
+        )
+        user_sub_folders = json.decode(self.folders)
+        deleted_folder = self.delete_folder(folder_name, in_folder, [], commit_delete=False)
+        user_sub_folders = json.decode(self.folders)
+        user_sub_folders = add_object_to_folder(deleted_folder, to_folder, user_sub_folders)
+        self.folders = json.encode(user_sub_folders)
+        self.save()
+
+        return self
+
+    def move_feeds_by_folder_to_folder(self, feeds_by_folder, to_folder):
+        logging.user(
+            self.user, "~FBMoving ~SB%s~SN feeds to folder: ~SB%s" % (len(feeds_by_folder), to_folder)
+        )
+        for feed_id, in_folder in feeds_by_folder:
+            feed_id = int(feed_id)
+            self.move_feed_to_folder(feed_id, in_folder, to_folder)
+
+        return self
+
+    def rewrite_feed(self, original_feed, duplicate_feed):
+        def rewrite_folders(folders, original_feed, duplicate_feed):
+            new_folders = []
+            # A reader subscribed to both feeds in the same folder would otherwise end up
+            # with the survivor listed twice there after the rewrite (merge_feeds).
+            feeds_in_this_folder = set()
+
+            for k, folder in enumerate(folders):
+                if isinstance(folder, int):
+                    rewritten = original_feed.pk if folder == duplicate_feed.pk else folder
+                    if rewritten in feeds_in_this_folder:
+                        continue
+                    feeds_in_this_folder.add(rewritten)
+                    new_folders.append(rewritten)
+                elif isinstance(folder, dict):
+                    for f_k, f_v in list(folder.items()):
+                        new_folders.append({f_k: rewrite_folders(f_v, original_feed, duplicate_feed)})
+
+            return new_folders
+
+        folders = json.decode(self.folders)
+        folders = rewrite_folders(folders, original_feed, duplicate_feed)
+        self.folders = json.encode(folders)
+        self.save()
+
+    def flat(self):
+        folders = json.decode(self.folders)
+
+        def _flat(folder, feeds=None):
+            if not feeds:
+                feeds = []
+            for item in folder:
+                if isinstance(item, int) and item not in feeds:
+                    feeds.append(item)
+                elif isinstance(item, dict):
+                    for f_k, f_v in list(item.items()):
+                        feeds.extend(_flat(f_v))
+            return feeds
+
+        return _flat(folders)
+
+    def feed_ids_under_folder_slug(self, slug):
+        folders = json.decode(self.folders)
+
+        def _feeds(folder, found=False, folder_title=None):
+            feeds = []
+            local_found = False
+            for item in folder:
+                if isinstance(item, int) and item not in feeds and found:
+                    feeds.append(item)
+                elif isinstance(item, dict):
+                    for f_k, f_v in list(item.items()):
+                        if slugify(f_k) == slug:
+                            found = True
+                            local_found = True
+                            folder_title = f_k
+                        found_feeds, folder_title = _feeds(f_v, found, folder_title)
+                        feeds.extend(found_feeds)
+                        if local_found:
+                            found = False
+                            local_found = False
+            return feeds, folder_title
+
+        return _feeds(folders)
+
+    @classmethod
+    def add_missing_feeds_for_user(cls, user_id):
+        user = User.objects.get(pk=user_id)
+        try:
+            usf = UserSubscriptionFolders.objects.get(user=user)
+        except UserSubscriptionFolders.DoesNotExist:
+            return
+
+        usf.add_missing_feeds()
+
+    def add_missing_feeds(self):
+        all_feeds = self.flat()
+        subs = [us.feed_id for us in UserSubscription.objects.filter(user=self.user).only("feed")]
+
+        missing_subs = set(all_feeds) - set(subs)
+        if missing_subs:
+            logging.debug(
+                " ---> %s is missing %s subs. Adding %s..." % (self.user, len(missing_subs), missing_subs)
+            )
+            for feed_id in missing_subs:
+                feed = Feed.get_by_id(feed_id)
+                if feed:
+                    if feed_id != feed.pk:
+                        logging.debug(
+                            " ---> %s doesn't match %s, rewriting to remove %s..."
+                            % (feed_id, feed.pk, feed_id)
+                        )
+                        # Clear out duplicate sub in folders before subscribing to feed
+                        duplicate_feed = Feed.get_by_id(feed_id)
+                        duplicate_feed.pk = feed_id
+                        self.rewrite_feed(feed, duplicate_feed)
+                    us, _ = UserSubscription.objects.get_or_create(
+                        user=self.user, feed=feed, defaults={"needs_unread_recalc": True}
+                    )
+                    if not us.needs_unread_recalc:
+                        us.needs_unread_recalc = True
+                        us.save()
+                elif feed_id and not feed:
+                    # No feed found for subscription, remove subscription
+                    logging.debug(" ---> %s: No feed found, removing subscription: %s" % (self.user, feed_id))
+                    self.delete_feed(feed_id, None, commit_delete=False)
+
+        missing_folder_feeds = set(subs) - set(all_feeds)
+        if missing_folder_feeds:
+            user_sub_folders = json.decode(self.folders)
+            logging.debug(
+                " ---> %s is missing %s folder feeds. Adding %s..."
+                % (self.user, len(missing_folder_feeds), missing_folder_feeds)
+            )
+            for feed_id in missing_folder_feeds:
+                feed = Feed.get_by_id(feed_id)
+                if feed and feed.pk == feed_id:
+                    user_sub_folders = add_object_to_folder(feed_id, "", user_sub_folders)
+            self.folders = json.encode(user_sub_folders)
+            self.save()
+
+    def auto_activate(self):
+        active_count = UserSubscription.objects.filter(user=self.user, active=True).count()
+        if active_count:
+            return
+
+        all_feeds = self.flat()
+        if not all_feeds:
+            return
+
+        feeds_to_activate = all_feeds
+        for feed in feeds_to_activate:
+            try:
+                sub = UserSubscription.objects.get(user=self.user, feed=feed)
+            except UserSubscription.DoesNotExist:
+                continue
+            sub.active = True
+            sub.save()
+            if sub.feed.active_subscribers <= 0:
+                sub.feed.count_subscribers()
+
+class RUserUnreadStory:
+    """Model to store manually unread stories that are older than a user's unread_cutoff
+    (same as days_of_unread). This is built for Premium Archive purposes.
+
+    If a story is marked as unread but is within the unread_cutoff, no need to add a
+    UserUnreadStory instance as it will be automatically marked as read according to
+    the user's days_of_unread preference.
+    """
+
+    @classmethod
+    def mark_unread(cls, user_id, story_hash, story_date, r=None):
+        if not r:
+            r = redis.Redis(connection_pool=settings.REDIS_STORY_HASH_POOL)
+        if isinstance(story_date, float):
+            story_date = int(story_date)
+        if not isinstance(story_date, int):
+            story_date = int(time.mktime(story_date.timetuple()))
+
+        feed_id, _ = MStory.split_story_hash(story_hash)
+        user_manual_unread_stories_key = f"uU:{user_id}"
+        user_manual_unread_stories_feed_key = f"uU:{user_id}:{feed_id}"
+
+        r.zadd(user_manual_unread_stories_key, {story_hash: story_date})
+        r.zadd(user_manual_unread_stories_feed_key, {story_hash: story_date})
+
+    @classmethod
+    def mark_read(cls, user_id, story_hashes, r=None):
+        if not isinstance(story_hashes, list):
+            story_hashes = [story_hashes]
+        if not r:
+            r = redis.Redis(connection_pool=settings.REDIS_STORY_HASH_POOL)
+
+        pipeline = r.pipeline()
+        for story_hash in story_hashes:
+            feed_id, _ = MStory.split_story_hash(story_hash)
+
+            user_manual_unread_stories_key = f"uU:{user_id}"
+            user_manual_unread_stories_feed_key = f"uU:{user_id}:{feed_id}"
+
+            pipeline.zrem(user_manual_unread_stories_key, story_hash)
+            pipeline.zrem(user_manual_unread_stories_feed_key, story_hash)
+        pipeline.execute()
+
+    @classmethod
+    def unreads(cls, user_id, story_hash):
+        if not isinstance(story_hash, list):
+            story_hash = [story_hash]
+
+        user_unread_stories = cls.objects.filter(user_id=user_id, story_hash__in=story_hash)
+
+        return user_unread_stories
+
+    @staticmethod
+    def get_stories_and_dates(user_id, feed_id, r=None):
+        if not r:
+            r = redis.Redis(connection_pool=settings.REDIS_STORY_HASH_POOL)
+
+        user_manual_unread_stories_feed_key = f"uU:{user_id}:{feed_id}"
+        story_hashes = r.zrange(user_manual_unread_stories_feed_key, 0, -1, withscores=True)
+
+        return story_hashes
+
+    @classmethod
+    def switch_feed(cls, user_id, old_feed_id, new_feed_id):
+        r = redis.Redis(connection_pool=settings.REDIS_STORY_HASH_POOL)
+        p = r.pipeline()
+        story_hashes = cls.get_stories_and_dates(user_id, old_feed_id, r=r)
+
+        for story_hash, story_timestamp in story_hashes:
+            _, hash_story = MStory.split_story_hash(story_hash)
+            new_story_hash = "%s:%s" % (new_feed_id, hash_story)
+            # read_feed_key = "RS:%s:%s" % (user_id, new_feed_id)
+            # user_manual_unread_stories_feed_key = f"uU:{user_id}:{new_feed_id}"
+            cls.mark_unread(user_id, new_story_hash, story_timestamp, r=p)
+
+        p.execute()
+
+        if len(story_hashes) > 0:
+            logging.info(" ---> %s archived unread stories" % len(story_hashes))
+
+class MFolderIcon(LegacyDocument):
+    """
+    Custom folder icons for users. Supports:
+    - Custom uploaded images (base64 PNG)
+    - Preset icons from Lucide or Heroicons library (icon name)
+    - Emoji icons (Unicode character)
+    """
+
+    user_id = models.IntegerField(null=True, blank=True)
+    folder_title = models.CharField(max_length=256, null=True, blank=True)
+    icon_type = models.CharField(max_length=20, default='none', null=True, blank=True)
+    icon_data = models.TextField(null=True, blank=True)
+    icon_color = models.CharField(max_length=20, null=True, blank=True)
+    icon_set = models.CharField(max_length=30, default='lucide', null=True, blank=True)
+    created_at = models.DateTimeField(default=datetime.datetime.now, null=True, blank=True)
+    updated_at = models.DateTimeField(default=datetime.datetime.now, null=True, blank=True)
+
+    class Meta:
+        db_table = "folder_icons"
+        indexes = [
+            models.Index(fields=['user_id']),
+        ]
+        constraints = [
+            models.UniqueConstraint(fields=['user_id', 'folder_title'], name='uniq_folder_icons_user_id_folder_title'),
+        ]
+
+    def __str__(self):
+        return f"[{self.user_id}] {self.folder_title}: {self.icon_type}"
+
+    @classmethod
+    def get_folder_icon(cls, user_id, folder_title):
+        try:
+            return cls.objects.get(user_id=user_id, folder_title=folder_title)
+        except cls.DoesNotExist:
+            return None
+
+    @classmethod
+    def get_folder_icons_for_user(cls, user_id):
+        return cls.objects.filter(user_id=user_id)
+
+    @classmethod
+    def save_folder_icon(
+        cls, user_id, folder_title, icon_type, icon_data=None, icon_color=None, icon_set=None
+    ):
+        try:
+            folder_icon = cls.objects.get(user_id=user_id, folder_title=folder_title)
+            folder_icon.icon_type = icon_type
+            folder_icon.icon_data = icon_data
+            folder_icon.icon_color = icon_color
+            folder_icon.icon_set = icon_set or "lucide"
+            folder_icon.updated_at = datetime.datetime.now()
+            folder_icon.save()
+        except cls.DoesNotExist:
+            folder_icon = cls.objects.create(
+                user_id=user_id,
+                folder_title=folder_title,
+                icon_type=icon_type,
+                icon_data=icon_data,
+                icon_color=icon_color,
+                icon_set=icon_set or "lucide",
+            )
+        return folder_icon
+
+    @classmethod
+    def delete_folder_icon(cls, user_id, folder_title):
+        cls.objects.filter(user_id=user_id, folder_title=folder_title).delete()
+
+    @classmethod
+    def rename_folder_icon(cls, user_id, old_folder_title, new_folder_title):
+        """Update folder_title when folder is renamed"""
+        folder_icon = cls.get_folder_icon(user_id, old_folder_title)
+        if folder_icon:
+            folder_icon.folder_title = new_folder_title
+            folder_icon.updated_at = datetime.datetime.now()
+            folder_icon.save()
+        return folder_icon
+
+    def to_json(self):
+        return {
+            "folder_title": self.folder_title,
+            "icon_type": self.icon_type,
+            "icon_data": self.icon_data,
+            "icon_color": self.icon_color,
+            "icon_set": self.icon_set or "lucide",
+        }
+
+class MCustomFeedIcon(LegacyDocument):
+    """
+    Custom feed icons for users. Overrides the default favicon.
+    Supports:
+    - Custom uploaded images (base64 PNG)
+    - Preset icons from Lucide or Heroicons library (icon name)
+    - Emoji icons (Unicode character)
+    """
+
+    user_id = models.IntegerField(null=True, blank=True)
+    feed_id = models.IntegerField(null=True, blank=True)
+    icon_type = models.CharField(max_length=20, default='none', null=True, blank=True)
+    icon_data = models.TextField(null=True, blank=True)
+    icon_color = models.CharField(max_length=20, null=True, blank=True)
+    icon_set = models.CharField(max_length=30, default='lucide', null=True, blank=True)
+    created_at = models.DateTimeField(default=datetime.datetime.now, null=True, blank=True)
+    updated_at = models.DateTimeField(default=datetime.datetime.now, null=True, blank=True)
+
+    class Meta:
+        db_table = "custom_feed_icons"
+        indexes = [
+            models.Index(fields=['user_id']),
+        ]
+        constraints = [
+            models.UniqueConstraint(fields=['user_id', 'feed_id'], name='uniq_custom_feed_icons_user_id_feed_id'),
+        ]
+
+    def __str__(self):
+        return f"[{self.user_id}] feed:{self.feed_id}: {self.icon_type}"
+
+    @classmethod
+    def get_feed_icon(cls, user_id, feed_id):
+        try:
+            return cls.objects.get(user_id=user_id, feed_id=feed_id)
+        except cls.DoesNotExist:
+            return None
+
+    @classmethod
+    def get_feed_icons_for_user(cls, user_id):
+        return cls.objects.filter(user_id=user_id)
+
+    @classmethod
+    def save_feed_icon(cls, user_id, feed_id, icon_type, icon_data=None, icon_color=None, icon_set=None):
+        try:
+            feed_icon = cls.objects.get(user_id=user_id, feed_id=feed_id)
+            feed_icon.icon_type = icon_type
+            feed_icon.icon_data = icon_data
+            feed_icon.icon_color = icon_color
+            feed_icon.icon_set = icon_set or "lucide"
+            feed_icon.updated_at = datetime.datetime.now()
+            feed_icon.save()
+        except cls.DoesNotExist:
+            feed_icon = cls.objects.create(
+                user_id=user_id,
+                feed_id=feed_id,
+                icon_type=icon_type,
+                icon_data=icon_data,
+                icon_color=icon_color,
+                icon_set=icon_set or "lucide",
+            )
+        return feed_icon
+
+    @classmethod
+    def delete_feed_icon(cls, user_id, feed_id):
+        cls.objects.filter(user_id=user_id, feed_id=feed_id).delete()
+
+    @classmethod
+    def switch_feed(cls, original_feed_id, duplicate_feed_id):
+        """Migrate custom feed icons from duplicate feed to original feed."""
+        duplicate_icons = cls.objects.filter(feed_id=duplicate_feed_id)
+        count = duplicate_icons.count()
+        if count:
+            logging.info(
+                " ---> Switching %s custom feed icons from feed %s to %s"
+                % (count, duplicate_feed_id, original_feed_id)
+            )
+            for icon in duplicate_icons:
+                renew_merge_feeds_locks()
+                # Check if user already has a custom icon for the original feed
+                try:
+                    cls.objects.get(user_id=icon.user_id, feed_id=original_feed_id)
+                    # User already has icon for original feed, delete the duplicate
+                    icon.delete()
+                except cls.DoesNotExist:
+                    # No existing icon, migrate this one
+                    icon.feed_id = original_feed_id
+                    icon.updated_at = datetime.datetime.now()
+                    icon.save()
+        return count
+
+    def to_json(self):
+        return {
+            "feed_id": self.feed_id,
+            "icon_type": self.icon_type,
+            "icon_data": self.icon_data,
+            "icon_color": self.icon_color,
+            "icon_set": self.icon_set or "lucide",
+        }
+
+class MFolderAutoMarkRead(LegacyDocument):
+    """
+    Auto-mark-read settings for folders. Allows users to automatically mark
+    stories as read after a certain number of days on a per-folder basis.
+
+    This works with inheritance:
+    - Site-wide setting (Profile.days_of_unread) is the default
+    - Folder settings can override the site-wide setting
+    - Nested folders inherit from parent unless overridden
+    - Feed settings (UserSubscription.auto_mark_read_days) override folder settings
+    """
+
+    user_id = models.IntegerField(null=True, blank=True)
+    folder_title = models.CharField(max_length=256, null=True, blank=True)
+    auto_mark_read_days = models.IntegerField(null=True, blank=True)
+    # None = inherit from parent folder or site-wide
+    # 0 = never auto-mark (explicit override to disable aging)
+    # 1-365 = days until auto-mark
+
+    class Meta:
+        db_table = "folder_auto_mark_read"
+        indexes = [
+            models.Index(fields=['user_id']),
+        ]
+        constraints = [
+            models.UniqueConstraint(fields=['user_id', 'folder_title'], name='uniq_folder_auto_mark_read_user_id_folder_title'),
+        ]
+
+    def __str__(self):
+        return f"[{self.user_id}] {self.folder_title}: {self.auto_mark_read_days} days"
+
+    @classmethod
+    def get_folder_setting(cls, user_id, folder_title):
+        """Get the auto-mark-read setting for a specific folder."""
+        try:
+            return cls.objects.get(user_id=user_id, folder_title=folder_title)
+        except cls.DoesNotExist:
+            return None
+
+    @classmethod
+    def get_folder_settings_for_user(cls, user_id):
+        """Get all auto-mark-read settings for a user."""
+        return cls.objects.filter(user_id=user_id)
+
+    @classmethod
+    def save_folder_setting(cls, user_id, folder_title, auto_mark_read_days):
+        """Save or update an auto-mark-read setting for a folder."""
+        try:
+            setting = cls.objects.get(user_id=user_id, folder_title=folder_title)
+            if auto_mark_read_days is None:
+                # Delete the setting if set to None (inherit)
+                setting.delete()
+                return None
+            setting.auto_mark_read_days = auto_mark_read_days
+            setting.save()
+        except cls.DoesNotExist:
+            if auto_mark_read_days is None:
+                return None
+            setting = cls.objects.create(
+                user_id=user_id,
+                folder_title=folder_title,
+                auto_mark_read_days=auto_mark_read_days,
+            )
+        return setting
+
+    @classmethod
+    def delete_folder_setting(cls, user_id, folder_title):
+        """Delete an auto-mark-read setting for a folder."""
+        cls.objects.filter(user_id=user_id, folder_title=folder_title).delete()
+
+    def to_json(self):
+        return {
+            "folder_title": self.folder_title,
+            "auto_mark_read_days": self.auto_mark_read_days,
+        }
+
+class TranslationCache(models.Model):
+    """One translated string, keyed by a hash of the source text.
+
+    Translation is stateless and the same headline shows up in dozens of stories, so
+    every result is kept: re-opening a feed must not call the upstream again. Rows are
+    global rather than per-user because this deployment has a single reader, and the
+    hash keeps arbitrarily long paragraphs inside a fixed-width index.
+    """
+
+    text_hash = models.CharField(max_length=64)
+    target_lang = models.CharField(max_length=16)
+    source_lang = models.CharField(max_length=16, blank=True, default="")
+    translation = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("text_hash", "target_lang")
+        indexes = [models.Index(fields=["target_lang", "created_at"])]
+
+    def __str__(self):
+        return f"{self.source_lang}->{self.target_lang}: {self.translation[:40]}"
+
+    @classmethod
+    def prune(cls, days=None):
+        """Drops translations older than days. A cached string only serves stories still
+        on hand, so the daily retention sweep expires it with them.
+        apps/reader/models.py"""
+        if days is None:
+            days = settings.TRANSLATION_CACHE_DAYS
+        if not days or int(days) <= 0:
+            return 0
+        cutoff = datetime.datetime.now() - datetime.timedelta(days=int(days))
+        deleted, _ = cls.objects.filter(created_at__lt=cutoff).delete()
+        return deleted
+
+
+class StoryTag(models.Model):
+    """A reader's own tag on a story, saved or not.
+
+    Starred stories already carry user_tags, but tagging should not require saving
+    the story, and search needs one place to look. Rows are per reader and per
+    story hash, so the same story can carry different tags for different readers.
+    """
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="story_tags")
+    story_hash = models.CharField(max_length=64)
+    tag = models.CharField(max_length=64)
+    created = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "story_tags"
+        unique_together = ("user", "story_hash", "tag")
+        indexes = [
+            models.Index(fields=["user", "tag"], name="story_tags_user_tag_idx"),
+            models.Index(fields=["user", "story_hash"], name="story_tags_user_hash_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.user_id}: {self.story_hash} #{self.tag}"
+
+    @classmethod
+    def normalize(cls, tag):
+        return (tag or "").strip().lower()[:64]
+
+    @classmethod
+    def add(cls, user_id, story_hash, tag):
+        tag = cls.normalize(tag)
+        if not tag or not story_hash:
+            return None
+        story_tag, _ = cls.objects.get_or_create(user_id=user_id, story_hash=story_hash, tag=tag)
+        return story_tag
+
+    @classmethod
+    def remove(cls, user_id, story_hash, tag):
+        tag = cls.normalize(tag)
+        return cls.objects.filter(user_id=user_id, story_hash=story_hash, tag=tag).delete()
+
+    @classmethod
+    def for_story(cls, user_id, story_hash):
+        return list(
+            cls.objects.filter(user_id=user_id, story_hash=story_hash)
+            .order_by("tag")
+            .values_list("tag", flat=True)
+        )
+
+    @classmethod
+    def counts(cls, user_id):
+        return list(
+            cls.objects.filter(user_id=user_id)
+            .values("tag")
+            .annotate(count=Count("id"))
+            .order_by("-count", "tag")
+        )
+
+    @classmethod
+    def story_hashes(cls, user_id, tag):
+        return list(cls.objects.filter(user_id=user_id, tag=cls.normalize(tag)).values_list("story_hash", flat=True))
+
+
+class SavedSearch(models.Model):
+    """A named search the reader can re-run from the sidebar.
+
+    The query is stored exactly as typed, so the search syntax (title:, tag:,
+    date:, ...) keeps working and improves without a migration. share_token makes
+    a read-only JSON feed of the results available without a login.
+    """
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="saved_searches")
+    name = models.CharField(max_length=128)
+    query = models.CharField(max_length=512)
+    order = models.CharField(max_length=8, default="newest")
+    share_token = models.CharField(max_length=32, blank=True, default="", db_index=True)
+    created = models.DateTimeField(auto_now_add=True)
+    updated = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "saved_searches"
+        ordering = ["name"]
+        unique_together = ("user", "name")
+
+    def __str__(self):
+        return f"{self.user_id}: {self.name} = {self.query}"
+
+    def ensure_share_token(self):
+        if not self.share_token:
+            self.share_token = uuid.uuid4().hex
+            self.save(update_fields=["share_token"])
+        return self.share_token
+

@@ -1,0 +1,259 @@
+/* ==========================================================================
+   NewsBlur design tokens (Inoreader-inspired 2024 refresh)
+
+   This is the single place to change the look of the reader shell. Every new
+   rule in modern.css reads from these variables, so a user can retheme the app
+   from Preferences > Custom CSS by overriding any of them:
+
+       #NB-custom-css {
+           --nb-accent: #0A7D4F;
+           --nb-radius-md: 4px;
+       }
+
+   Naming: --nb-<group>-<name>. Colors are defined once for light mode and
+   overridden under body.NB-dark. Spacing follows a 4px scale (space-1..8).
+   ========================================================================== */
+
+:root {
+    /* ---- Brand / accent ---- */
+    --nb-accent: #1875F3;
+    --nb-accent-hover: #0F63D6;
+    --nb-accent-press: #0A54B8;
+    --nb-accent-soft: #E8F1FE;
+    --nb-accent-soft-2: #F2F7FF;
+    --nb-on-accent: #FFFFFF;
+
+    /* ---- Account / static pages ---- */
+    --nb-danger: #B42318;
+    --nb-danger-hover: #8F1D14;
+    --nb-danger-press: #74160F;
+    --nb-static-copy: #6B5C3A;
+    --nb-static-input-text: #F5F2EA;
+    --nb-static-error: #FFB4A8;
+
+    /* ---- Surfaces ---- */
+    --nb-bg: #F7F8FA;
+    --nb-surface: #FFFFFF;
+    --nb-surface-2: #F3F5F8;
+    --nb-surface-3: #EDF0F4;
+    --nb-hover: #F1F5FB;
+    --nb-active: #E8F1FE;
+
+    /* ---- Lines ---- */
+    --nb-border: #E6E9EF;
+    --nb-border-strong: #D5DAE3;
+
+    /* ---- Text ---- */
+    --nb-text: #16191D;
+    --nb-text-2: #4B5563;
+    --nb-meta: #6B7280;
+    --nb-text-invert: #FFFFFF;
+
+    /* ---- Navigation rail ---- */
+    --nb-rail-bg: #12335F;
+    --nb-rail-bg-hover: rgba(255, 255, 255, .10);
+    --nb-rail-bg-active: rgba(255, 255, 255, .16);
+    --nb-rail-fg: #B9CBE8;
+    --nb-rail-fg-active: #FFFFFF;
+    --nb-rail-badge-bg: #FFFFFF;
+    --nb-rail-badge-fg: #12335F;
+    --nb-rail-border: rgba(255, 255, 255, .10);
+
+    /* ---- Radii ---- */
+    --nb-radius-xs: 4px;
+    --nb-radius-sm: 6px;
+    --nb-radius-md: 8px;
+    --nb-radius-lg: 12px;
+    --nb-radius-xl: 16px;
+    --nb-radius-pill: 999px;
+
+    /* ---- Spacing (4px scale) ---- */
+    --nb-space-1: 4px;
+    --nb-space-2: 8px;
+    --nb-space-3: 12px;
+    --nb-space-4: 16px;
+    --nb-space-5: 24px;
+    --nb-space-6: 32px;
+    --nb-space-7: 40px;
+    --nb-space-8: 48px;
+
+    /* ---- Elevation ---- */
+    --nb-shadow-sm: 0 1px 2px rgba(16, 24, 40, .06);
+    --nb-shadow-md: 0 4px 12px rgba(16, 24, 40, .08);
+    --nb-shadow-lg: 0 12px 28px rgba(16, 24, 40, .14);
+
+    /* ---- Layout metrics ---- */
+    --nb-rail-w: 76px;
+    /* Height of the rail when it is a bottom bar (phones). Zero while the rail
+       is a column, so overlays can use it in calc() at every width. */
+    --nb-rail-h: 0px;
+    --nb-toolbar-h: 56px;
+    --nb-sidebar-row-h: 34px;
+    --nb-content-max: 700px;
+    --nb-feed-icon-size: 16px;
+
+    /* ---- Typography ---- */
+    --nb-font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC",
+        "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", Roboto,
+        "Helvetica Neue", Arial, sans-serif;
+    --nb-font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+        "Liberation Mono", "Noto Sans Mono CJK SC", monospace;
+    --nb-fs-1: 11px;
+    --nb-fs-2: 12px;
+    --nb-fs-3: 13px;
+    --nb-fs-4: 14px;
+    --nb-fs-5: 15px;
+    --nb-fs-6: 17px;
+    --nb-fs-7: 20px;
+    --nb-fs-8: 24px;
+    --nb-fw-normal: 400;
+    --nb-fw-medium: 500;
+    --nb-fw-semibold: 600;
+    --nb-fw-bold: 650;
+    --nb-lh-tight: 1.3;
+    --nb-lh-normal: 1.5;
+    --nb-lh-relaxed: 1.65;
+
+    /* ---- Motion ---- */
+    --nb-ease: cubic-bezier(.2, .7, .3, 1);
+    --nb-dur-fast: 120ms;
+    --nb-dur: 180ms;
+}
+
+/* Dark theme. base.html adds .NB-dark to <body> before first paint (reads
+   localStorage 'newsblur:theme'), and NEWSBLUR.reader.switch_theme() toggles it
+   at runtime, so these overrides are the only place dark mode needs to know
+   about the new shell. */
+body.NB-dark {
+    --nb-accent: #4C9AFF;
+    --nb-accent-hover: #6FB0FF;
+    --nb-accent-press: #3C88EA;
+    --nb-accent-soft: #16273D;
+    --nb-accent-soft-2: #131E2C;
+    --nb-on-accent: #08121F;
+
+    --nb-bg: #121417;
+    --nb-surface: #1A1D22;
+    --nb-surface-2: #20242A;
+    --nb-surface-3: #262B32;
+    --nb-hover: #232830;
+    --nb-active: #1B2C42;
+
+    --nb-border: #2A2F37;
+    --nb-border-strong: #3A414B;
+
+    --nb-text: #E8EAEE;
+    --nb-text-2: #B4BBC6;
+    --nb-meta: #939CAA;
+    --nb-text-invert: #121417;
+
+    --nb-rail-bg: #0D1A2E;
+    --nb-rail-bg-hover: rgba(255, 255, 255, .07);
+    --nb-rail-bg-active: rgba(255, 255, 255, .13);
+    --nb-rail-fg: #A9BCD8;
+    --nb-rail-fg-active: #FFFFFF;
+    --nb-rail-badge-bg: #4C9AFF;
+    --nb-rail-badge-fg: #08121F;
+    --nb-rail-border: rgba(255, 255, 255, .08);
+
+    --nb-shadow-sm: 0 1px 2px rgba(0, 0, 0, .4);
+    --nb-shadow-md: 0 4px 14px rgba(0, 0, 0, .5);
+    --nb-shadow-lg: 0 14px 34px rgba(0, 0, 0, .6);
+}
+
+/* The card tokens that grid.css already published keep working, but now they
+   point at the global scale so both files stay in sync. */
+:root {
+    --nb-card-accent: var(--nb-accent);
+    --nb-card-surface: var(--nb-surface);
+    --nb-card-surface-alt: var(--nb-surface-2);
+    --nb-card-border: var(--nb-border);
+    --nb-card-border-strong: var(--nb-border-strong);
+    --nb-card-title: var(--nb-text);
+    --nb-card-title-read: var(--nb-text-2);
+    --nb-card-meta: var(--nb-meta);
+    --nb-card-radius: var(--nb-radius-lg);
+    --nb-card-shadow: var(--nb-shadow-sm);
+    --nb-card-shadow-hover: var(--nb-shadow-md);
+}
+
+/* -------------------------------------------------------------------------
+   Legacy palette
+
+   The pre-token stylesheets repeated these colours by hand across every core
+   and dark stylesheet. Each literal that appeared at least six times now has
+   a token named after its value, so the value is defined once and the rules
+   read var(--nb-legacy-...). The names are intentionally literal: this layer
+   records what the old design used, it is not a semantic colour system. New
+   rules should use the --nb-* tokens at the top of this file.
+   ------------------------------------------------------------------------- */
+:root {
+    --nb-legacy-c0c0c0: #c0c0c0;
+    --nb-legacy-444: #444;
+    --nb-legacy-5c89c9: #5c89c9;
+    --nb-legacy-fff: #fff;
+    --nb-legacy-333: #333;
+    --nb-legacy-e0e0e0: #e0e0e0;
+    --nb-legacy-2a2a2a: #2a2a2a;
+    --nb-legacy-505050: #505050;
+    --nb-legacy-777: #777;
+    --nb-legacy-999: #999;
+    --nb-legacy-ddd: #ddd;
+    --nb-legacy-666: #666;
+    --nb-legacy-303739: #303739;
+    --nb-legacy-555: #555;
+    --nb-legacy-888: #888;
+    --nb-legacy-a0a0a0: #a0a0a0;
+    --nb-legacy-808080: #808080;
+    --nb-legacy-aaa: #aaa;
+    --nb-legacy-ffffff: #ffffff;
+    --nb-legacy-4a90d9: #4a90d9;
+    --nb-legacy-d0d0d0: #d0d0d0;
+    --nb-legacy-606060: #606060;
+    --nb-legacy-909090: #909090;
+    --nb-legacy-707070: #707070;
+    --nb-legacy-90928b: #90928b;
+    --nb-legacy-ccc: #ccc;
+    --nb-legacy-e8e8e8: #e8e8e8;
+    --nb-legacy-303030: #303030;
+    --nb-legacy-191b1c: #191b1c;
+    --nb-legacy-3a3a3a: #3a3a3a;
+    --nb-legacy-f0f0f0: #f0f0f0;
+    --nb-legacy-404040: #404040;
+    --nb-legacy-34912e: #34912e;
+    --nb-legacy-7ca4d8: #7ca4d8;
+    --nb-legacy-a90103: #a90103;
+    --nb-legacy-1e1e1e: #1e1e1e;
+    --nb-legacy-b0b0b0: #b0b0b0;
+    --nb-legacy-000: #000;
+    --nb-legacy-1a1a1a: #1a1a1a;
+    --nb-legacy-252d30: #252d30;
+    --nb-legacy-f7f8f5: #f7f8f5;
+    --nb-legacy-2e7d32: #2e7d32;
+    --nb-legacy-83b4e0: #83b4e0;
+    --nb-legacy-bdc0d7: #bdc0d7;
+    --nb-legacy-10120b: #10120b;
+    --nb-legacy-2d261a: #2d261a;
+    --nb-legacy-f1f3ec: #f1f3ec;
+    --nb-legacy-222: #222;
+    --nb-legacy-404548: #404548;
+    --nb-legacy-4caf50: #4caf50;
+    --nb-legacy-6b0001: #6b0001;
+    --nb-legacy-d5d4db: #d5d4db;
+    --nb-legacy-e5e7eb: #e5e7eb;
+    --nb-legacy-ff6b6b: #ff6b6b;
+    --nb-legacy-217412: #217412;
+    --nb-legacy-4a73b0: #4a73b0;
+    --nb-legacy-4a78b5: #4a78b5;
+    --nb-legacy-4b5563: #4b5563;
+    --nb-legacy-4ecdc4: #4ecdc4;
+    --nb-legacy-60a5fa: #60a5fa;
+    --nb-legacy-6b7280: #6b7280;
+    --nb-legacy-6ea74e: #6ea74e;
+    --nb-legacy-a78bfa: #a78bfa;
+    --nb-legacy-bbb: #bbb;
+    --nb-legacy-c4b5fd: #c4b5fd;
+    --nb-legacy-d0d2cc: #d0d2cc;
+    --nb-legacy-d58586: #d58586;
+    --nb-legacy-d8d8d8: #d8d8d8;
+}

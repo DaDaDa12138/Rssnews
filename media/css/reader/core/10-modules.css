@@ -1,0 +1,741 @@
+/* ================ */
+/* = Page Modules = */
+/* ================ */
+
+.NB-module .NB-module-direction {
+    display: block;
+    width: 24px;
+    height: 32px;
+    float: right;
+    margin: -8px 0;
+    padding: 0px;
+}
+
+.NB-module .NB-module-direction.NB-disabled {
+    opacity: .25;
+}
+
+.NB-module .NB-module-next-page {
+    margin-right: -12px;
+    padding-right: 8px;
+
+    background: transparent url('/media/embed/reader/next_page.png') no-repeat 4px center;
+    background-size: 14px;
+}
+
+.NB-module .NB-module-next-page.NB-javascript {
+    opacity: .2;
+}
+
+.NB-module .NB-module-next-page:link {
+    background: transparent url('/media/embed/reader/next_page.png') no-repeat 4px center;
+    background-size: 14px;
+}
+
+.NB-module .NB-module-next-page:hover {
+    background: transparent url('/media/embed/reader/next_page_active.png') no-repeat 4px center;
+    background-size: 14px;
+}
+
+.NB-module .NB-module-next-page.NB-disabled:hover {
+    background: transparent url('/media/embed/reader/next_page.png') no-repeat 4px center;
+    background-size: 14px;
+    cursor: default;
+}
+
+.NB-module .NB-module-previous-page {
+    padding: 0 4px 0 4px;
+    background: transparent url('/media/embed/reader/previous_page.png') no-repeat 8px center;
+    background-size: 14px;
+}
+
+.NB-module .NB-module-previous-page:link {
+    background: transparent url('/media/embed/reader/previous_page.png') no-repeat 8px center;
+    background-size: 14px;
+}
+
+.NB-module .NB-module-previous-page:hover {
+    background: transparent url('/media/embed/reader/previous_page_active.png') no-repeat 8px center;
+    background-size: 14px;
+}
+
+.NB-module .NB-module-previous-page.NB-disabled:hover {
+    background: transparent url('/media/embed/reader/previous_page.png') no-repeat 8px center;
+    background-size: 14px;
+    cursor: default;
+}
+
+.NB-module .NB-module-page-indicator {
+    display: block;
+    width: 16px;
+    height: 16px;
+    float: left;
+    padding: 2px 3px 0px;
+    opacity: .25;
+    cursor: pointer;
+    background: transparent url('/media/embed/icons/silk/bullet_blue.png') no-repeat center center;
+}
+
+.NB-module .NB-module-page-indicator:hover {
+    opacity: 1;
+}
+
+.NB-module .NB-module-page-indicator.NB-active {
+    opacity: 1;
+    background: transparent url('/media/embed/icons/silk/bullet_orange.png') no-repeat center center;
+}
+
+/* ============= */
+/* = Main Page = */
+/* ============= */
+
+.NB-module a {
+    text-decoration: none;
+    /*    color: #3E4773;*/
+}
+
+.NB-module a:hover {
+    /*    color: #0E1763;*/
+}
+
+.NB-module h5 {
+    margin: 0 0 12px;
+    padding: 8px 12px 6px;
+    overflow: hidden;
+}
+
+.NB-module .NB-module-header-left {
+    float: left;
+}
+
+.NB-module .NB-module-header-center {
+    text-align: center;
+    margin: 0 auto;
+    width: 132px;
+}
+
+.NB-module .NB-module-header-right {
+    font-size: 13px;
+    line-height: 16px;
+    font-weight: normal;
+    display: flex;
+    order: 2;
+    flex: 0 1 0;
+    margin-left: auto;
+}
+
+.NB-module .NB-module-header-text {
+    flex: 2 1 0;
+}
+
+.NB-module .NB-spinner {
+    background: transparent url('/media/embed/reader/ring_spinner.svg') no-repeat center center;
+    background-size: 16px;
+    width: 16px;
+    height: 16px;
+    margin: 0 6px;
+    opacity: .6;
+    display: none;
+}
+
+.NB-module.NB-loading .NB-spinner,
+.NB-module-item.NB-loading .NB-spinner {
+    display: block;
+}
+
+.NB-module .NB-module-content-header {
+    padding-left: 4px;
+}
+
+.NB-module-content-header {
+    padding: 0 0 0px;
+    margin: 0 0 4px 0;
+    font-size: 13px;
+    letter-spacing: 1px;
+    color: #696e62;
+    clear: both;
+}
+
+.NB-module .NB-module-content-subtitle {
+    float: right;
+    color: var(--nb-legacy-c0c0c0);
+    text-shadow: none;
+    margin: 2px 0 0 0;
+    font-size: 10px;
+    white-space: nowrap;
+}
+
+.NB-module .NB-module-content-account-realtime {
+    background: transparent url('/media/img/reader/realtime_spinner_loading.gif') no-repeat 0 1px;
+    font-size: 11px;
+    text-transform: uppercase;
+    color: #D8BD70;
+    font-weight: bold;
+    float: right;
+    width: 16px;
+    height: 16px;
+    margin: 0 4px 0 0;
+}
+
+.NB-module .NB-module-content-account-realtime.NB-active {
+    background: transparent url('/media/img/reader/realtime_spinner.gif') no-repeat 0 1px;
+}
+
+.NB-module .NB-module-content-account-realtime.NB-error {
+    background: transparent url('/media/img/reader/realtime_spinner_error.gif') no-repeat 0 1px;
+}
+
+.NB-module .NB-module-item {
+    position: relative;
+    min-height: 77px;
+    clear: both;
+    overflow: hidden;
+    border-radius: 3px;
+}
+
+.NB-module .NB-module-item.NB-last {
+    margin-bottom: 0;
+}
+
+.NB-module .NB-module-item-image {
+    position: absolute;
+    left: 0;
+    top: 0;
+}
+
+.NB-module .NB-module-item .NB-module-item-image img {
+    width: 100px;
+    height: 75px;
+    overflow: hidden;
+    margin: 0 8px 2px 12px;
+    border: 1px solid var(--nb-legacy-606060);
+    -moz-box-shadow: 1px 1px 0 var(--nb-legacy-d0d0d0);
+    -webkit-box-shadow: 1px 1px 0 var(--nb-legacy-d0d0d0);
+    box-shadow: 1px 1px 0 var(--nb-legacy-d0d0d0);
+}
+
+.NB-module .NB-modal-submit-grey {
+    color: var(--nb-legacy-505050);
+}
+
+.NB-module .NB-module-item .NB-module-item-title {
+    margin: 0 0 4px 128px;
+}
+
+.NB-module .NB-module-item .NB-modal-submit-button {
+    float: left;
+    margin: 4px 0 0 0;
+}
+
+.NB-module .NB-module-item .NB-menu-manage-logout {
+    float: right;
+    margin: 4px 4px 0 0;
+}
+.NB-account .NB-module,
+.NB-manage .NB-module {
+    margin: 0;
+    padding: 0;
+    clear: both;
+    overflow: hidden;
+}
+
+.NB-account .NB-module .NB-module-account-settings {
+    background: transparent url('/media/embed/icons/nouns/settings.svg') no-repeat 0 0;
+    background-size: 16px;
+    width: 16px;
+    height: 16px;
+    float: right;
+    cursor: pointer;
+}
+
+.NB-module .NB-module-account-settings.NB-javascript {
+    opacity: .2;
+    cursor: default;
+}
+
+.NB-account .NB-module .NB-module-item .NB-module-account-premium {
+    float: right;
+    margin-right: 12px;
+}
+
+.NB-account .NB-module .NB-module-item .NB-modal-submit-button.NB-javascript {
+    opacity: .2;
+}
+
+.NB-module.NB-module-features .NB-module-content-header {
+    /* border-bottom: 1px solid #E8EAE4; */
+    padding-bottom: 4px;
+}
+
+.NB-module-account .NB-module-content-header,
+.NB-module-account .NB-module-item .NB-module-item-title {
+    clear: none;
+    overflow: hidden;
+}
+
+.NB-module-account .NB-module-item .NB-module-item-image img {
+    width: 100px;
+    margin-right: 14px;
+    height: auto;
+    border: none;
+    -moz-box-shadow: none;
+    -webkit-box-shadow: none;
+    box-shadow: none;
+    cursor: pointer;
+    margin-top: 6px;
+    border-radius: 4px;
+}
+
+/* ======================= */
+/* = How it Works Module = */
+/* ======================= */
+
+.NB-module-howitworks {
+    position: relative;
+    overflow: hidden;
+}
+
+.NB-module-howitworks .NB-howitworks-page-indicators {
+    position: absolute;
+    width: 132px;
+    height: 20px;
+    right: 64px;
+    top: 8px;
+}
+
+.NB-module-howitworks .NB-howitworks-page {
+    display: none;
+    overflow: hidden;
+    left: 0;
+    margin: 12px 0 0;
+}
+
+.NB-module-howitworks .NB-howitworks-page.NB-active {
+    display: block;
+}
+
+.NB-module-howitworks .NB-howitworks-page .NB-howitworks-page-image {
+    width: 200px;
+    height: 135px;
+    padding: 2px;
+    border: 1px solid var(--nb-legacy-e0e0e0);
+    margin: 0 12px 0;
+    float: left;
+}
+
+.NB-module-howitworks .NB-howitworks-page .NB-howitworks-page-description {
+    height: 135px;
+    line-height: 30px;
+    font-size: 22px;
+    color: var(--nb-legacy-303030);
+    text-shadow: 1px 1px 0px var(--nb-legacy-f0f0f0);
+    width: 248px;
+}
+
+.NB-module-howitworks .NB-howitworks-page .NB-howitworks-page-description td {
+    padding: 0;
+    margin: 0;
+    vertical-align: middle;
+    text-align: center;
+}
+
+/* =================== */
+/* = Getting started = */
+/* =================== */
+
+.NB-account .NB-module-gettingstarted {
+    margin-bottom: 24px;
+}
+
+.NB-module-gettingstarted .NB-module-item-intro {
+    border-radius: 8px;
+    padding: 20px 16px;
+    margin-bottom: 24px;
+    overflow: hidden;
+    background: linear-gradient(145deg, #f8fdf4 0%, #eef7e5 50%, #e5f2d8 100%);
+    border: 1px solid rgba(106, 142, 66, 0.25);
+    box-shadow: 0 2px 8px rgba(106, 142, 66, 0.08);
+}
+
+.NB-module-gettingstarted .NB-intro-avatar {
+    margin: 12px auto 36px;
+}
+
+.NB-module-gettingstarted .NB-intro-avatar-bezel {
+    padding: 4px;
+    width: 48px;
+    line-height: 0;
+    margin: 0 auto 20px;
+    background: linear-gradient(135deg, rgba(106, 142, 66, 0.15) 0%, rgba(106, 142, 66, 0.08) 100%);
+    border-radius: 50%;
+    box-shadow: 0 2px 8px rgba(106, 142, 66, 0.12);
+}
+
+.NB-module-gettingstarted .NB-intro-avatar img {
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+}
+
+.NB-module-gettingstarted .NB-intro-progress {
+    position: relative;
+    margin: 24px 64px;
+}
+
+.NB-module-gettingstarted .NB-intro-progress .progress {
+    height: 10px;
+    margin-top: -30px;
+}
+
+.NB-module-gettingstarted .NB-intro-progress-goal {
+    top: -10px;
+    left: 0px;
+    position: absolute;
+    border-radius: 16px;
+    background-color: var(--nb-legacy-fff);
+    border: 1px solid rgba(106, 142, 66, 0.25);
+    box-shadow: 0 1px 4px rgba(106, 142, 66, 0.15);
+    width: 28px;
+    height: 28px;
+    z-index: 1;
+}
+
+.NB-module-gettingstarted .NB-intro-progress-goal.NB-1 {
+    left: 0;
+    background: var(--nb-legacy-fff) url(/media/embed/icons/silk/flag_blue.png) no-repeat center center;
+}
+
+.NB-module-gettingstarted .NB-intro-progress-goal.NB-2 {
+    margin: 0 auto;
+    left: auto;
+    position: relative;
+    background: var(--nb-legacy-fff) url(/media/embed/icons/silk/flag_green.png) no-repeat center center;
+}
+
+.NB-module-gettingstarted .NB-intro-progress-goal.NB-3 {
+    left: auto;
+    right: 0;
+    background: var(--nb-legacy-fff) url(/media/embed/icons/silk/flag_yellow.png) no-repeat center center;
+}
+
+.NB-module-gettingstarted .NB-intro-progress-goal.NB-done {
+    background: linear-gradient(135deg, #6a9e42 0%, #5a8a36 100%);
+    border-color: rgba(90, 138, 54, 0.4);
+}
+
+.NB-module-gettingstarted .NB-intro-progress-goal.NB-done::after {
+    content: '\2713';
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    font-size: 16px;
+    font-weight: bold;
+}
+
+.NB-module-gettingstarted .NB-intro-goals {
+    margin: 24px 0 0;
+    overflow: hidden;
+}
+
+.NB-module-gettingstarted .NB-intro-goal {
+    width: 33.33%;
+    float: left;
+    text-align: center;
+    font-size: 12px;
+    color: #5E6062;
+    padding: 0 6px;
+    -webkit-box-sizing: border-box;
+    -moz-box-sizing: border-box;
+    box-sizing: border-box;
+}
+
+.NB-module-gettingstarted .NB-icon {
+    display: inline-block;
+    margin: 0 2px 0 0;
+    width: 16px;
+    height: 16px;
+    vertical-align: text-bottom;
+}
+
+.NB-module-gettingstarted .NB-modal-submit-button {
+    padding: 4px 6px;
+}
+
+.NB-module-gettingstarted .NB-module-launch-intro .NB-icon {
+    background: transparent url(/media/embed/icons/silk/lorry.png) no-repeat center center;
+    background-size: 16px;
+}
+
+.NB-module-gettingstarted .NB-module-friends-button .NB-icon {
+    background: transparent url('/media/embed/icons/nouns/share.svg') no-repeat 0 0;
+    background-size: 16px;
+}
+
+.NB-module-gettingstarted .NB-module-account-train .NB-icon {
+    background: transparent url("/media/embed/icons/nouns/dialog-trainer.svg") no-repeat center center;
+    background-size: 16px;
+    filter: hue-rotate(140deg) saturate(15);
+}
+
+.NB-module-gettingstarted .NB-intro-goal .NB-not-done {
+    margin: 6px auto;
+    float: none;
+}
+
+.NB-module-gettingstarted .NB-intro-goal .NB-done {
+    color: #7CB621;
+    font-weight: bold;
+    padding: 12px 0;
+}
+
+.NB-module-gettingstarted .NB-done .NB-not-done,
+.NB-module-gettingstarted .NB-not-done .NB-done {
+    display: none;
+}
+.NB-module-premium .NB-module-item .NB-modal-submit-button {
+    float: none;
+}
+.NB-module.NB-module-premium .NB-module-premium-button {
+    padding: 12px 28px;
+    margin: 20px auto 0;
+    display: block;
+    float: none;
+    width: fit-content;
+    font-weight: 500;
+    border-radius: 6px;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.NB-module.NB-module-premium .NB-module-premium-button:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(106, 142, 66, 0.3);
+}/* ================================= */
+/* = Feed Chooser Trial Banner     = */
+/* ================================= */
+
+.NB-modal-feedchooser .NB-feedchooser-trial-banner {
+    margin: 0 24px 24px;
+    padding: 16px;
+    border: 2px solid #e6c86e;
+    background: linear-gradient(135deg, #fff9e6 0%, #fff3d4 100%);
+    border-radius: 6px;
+    text-align: center;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.NB-modal-feedchooser .NB-feedchooser-trial-icon {
+    width: 24px;
+    height: 24px;
+    margin-right: 10px;
+    background: transparent url('/media/img/icons/silk/award_star_gold_1.png') no-repeat center center;
+    background-size: 16px;
+    flex-shrink: 0;
+}
+
+.NB-modal-feedchooser .NB-feedchooser-trial-message {
+    font-size: 15px;
+    color: #6a5818;
+}
+
+.NB-modal-feedchooser .NB-feedchooser-trial-message strong {
+    color: #c4880a;
+    font-size: 17px;
+}
+
+.NB-modal-feedchooser .NB-feedchooser-trial-upgrade {
+    margin-top: 24px;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.NB-modal-feedchooser .NB-feedchooser-trial-cta {
+    margin-bottom: 20px;
+    padding: 12px 16px;
+    font-size: 14px;
+    font-weight: 500;
+    color: #5a7a3a;
+    text-align: center;
+    width: 100%;
+    background: linear-gradient(135deg, #f0f7e6 0%, #e8f2dc 100%);
+    border-radius: 6px;
+    border: 1px solid rgba(106, 142, 66, 0.2);
+}
+
+.NB-modal-feedchooser .NB-feedchooser-trial-upgrade .NB-provider-main,
+.NB-modal-feedchooser .NB-feedchooser-trial-upgrade .NB-provider-alternate {
+    width: calc(50% - 25px);
+}/* ================= */
+/* = Manage Module = */
+/* ================= */
+
+.NB-module-manage .NB-menu-manage li.NB-menu-item {
+    background-color: var(--nb-legacy-f7f8f5);
+}
+.NB-module-stats-counts {
+    border-radius: 4px;
+    background-color: var(--nb-legacy-f7f8f5);
+    border: 1px solid rgba(0, 0, 0, .05);
+    overflow: hidden;
+    margin-bottom: 20px;
+}/* ================== */
+/* = Center Modules = */
+/* ================== */
+
+.NB-modules-center,
+.NB-account-wide {
+    margin: 24px 0 0 0px;
+    flex: 1;
+    transition: margin 0.36s ease-out,
+        padding 0.36s ease-out,
+        gap 0.36s ease-out;
+}
+
+.NB-modules-center {
+    flex: 4 1 0;
+    min-width: 0;
+}
+
+.NB-account-wide {
+    flex: 3 1 0;
+    min-width: 0;
+}
+
+.NB-module-header {
+    transition: margin 0.36s ease-out;
+}
+
+.NB-dashboard-rivers-left .NB-module,
+.NB-dashboard-rivers-right .NB-module {
+    margin: 0 0 34px;
+    clear: both;
+}
+
+.NB-module-river .NB-story-title-container:first-child .NB-story-title {
+    border-top: none;
+}
+
+.NB-module-river .NB-story-title-container:last-child .NB-story-title {
+    border-bottom: none;
+}
+
+.NB-module-river .NB-module-river-favicon {
+    display: inline-block;
+    cursor: pointer;
+}
+
+.NB-module-river .NB-module-river-favicon img {
+    width: 16px;
+    height: 16px;
+    transform: translate(0px, 2px);
+    margin-right: 8px;
+}
+
+.NB-module-river .NB-module-river-favicon .NB-feed-emoji,
+.NB-module-river .NB-module-river-favicon .NB-feed-icon-colored,
+.NB-module-river .NB-module-river-favicon .NB-folder-emoji,
+.NB-module-river .NB-module-river-favicon .NB-folder-icon-colored {
+    transform: translate(0px, 2px);
+    margin-right: 8px;
+}
+
+.NB-module-river .NB-module-river-title {
+    display: inline-block;
+    cursor: pointer;
+    text-align: left;
+    display: flex;
+    justify-content: center;
+    flex: 1 1 0;
+}
+
+.NB-module-river .NB-dashboard-column-control {
+    float: left;
+    line-height: 0;
+    display: none;
+    margin-right: 6px;
+}
+
+.NB-module-river .NB-dashboard-column-control.NB-active {
+    display: inline-block;
+}
+
+.NB-module-river .NB-dashboard-column-control li {
+    width: 32px;
+    padding: 5px 0;
+}
+
+.NB-module-river .NB-dashboard-column-control li img {
+    opacity: 0.3;
+    width: 16px;
+    height: 16px;
+}
+
+.NB-module-river .NB-dashboard-column-control li.NB-active img {
+    opacity: 0.5;
+}
+
+.NB-module-river .NB-module-river-settings {
+    order: 3;
+}
+
+.NB-module-river .NB-view-river {
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+    border-radius: 3px;
+    margin: 0 2px;
+}
+
+.NB-module-river .NB-feedbar-options-container {
+    float: right;
+}
+
+.NB-module-river .NB-feedbar-options {
+    cursor: pointer;
+    float: right;
+    text-transform: uppercase;
+    color: rgba(0, 0, 0, .5);
+    border: 1px solid rgba(0, 0, 0, .1);
+    border-radius: 16px;
+    font-size: 9px;
+    font-weight: bold;
+    padding: 1px 4px 1px 8px;
+    line-height: 14px;
+    margin: 1px 0 0;
+}
+
+.NB-module-river .NB-feedbar-options:hover,
+.NB-module-river .NB-feedbar-options.NB-active {
+    background-color: rgba(0, 0, 0, .1);
+}
+
+.NB-module-river .NB-feedbar-options .NB-icon {
+    float: right;
+    width: 16px;
+    height: 12px;
+    background: transparent url('/media/embed/icons/nouns/down.svg') no-repeat center center;
+    background-size: 8px;
+    margin: 0 0 0 4px;
+}.NB-module-features .NB-module-header:hover .NB-features-add {
+    display: block;
+}#add-feature-form {
+    display: none;
+}.NB-module-recommended .NB-javascript.NB-module-direction,
+.NB-module-recommended .NB-javascript.NB-modal-submit-button,
+.NB-module-recommended .NB-javascript.NB-recommended-statistics,
+.NB-module-recommended .NB-javascript.NB-recommended-intelligence {
+    opacity: .2;
+}.NB-module-recommended .NB-modal-submit {
+    margin: 8px 0 0 0;
+}
+.NB-module-recommended .NB-modal-submit-button {
+    float: left;
+    margin-left: 0;
+    margin-right: 8px;
+}.NB-module-recommended .NB-module-header:hover .NB-recommended-show-moderation-wrapper {
+    display: block;
+}

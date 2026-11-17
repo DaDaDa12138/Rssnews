@@ -1,0 +1,286 @@
+/* ========== */
+/* = Global = */
+/* ========== */
+
+body {
+    /*resets*/
+    margin: 0;
+    padding: 0;
+    border: 0;
+    outline: 0;
+    line-height: 1.3;
+    text-decoration: none;
+    list-style: none;
+    height: 100%;
+    overflow: hidden;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    background-color: white;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-color: #C2C2C2 #FAFAFA;
+}
+
+.NB-body-main {
+    background-color: var(--nb-legacy-f7f8f5);
+}
+
+/*::-webkit-scrollbar {
+    width: 12px;
+}
+*/
+::-webkit-scrollbar-thumb {
+    background-color: #C2C2C2;
+}
+
+::-webkit-scrollbar-track {
+    background-color: #FAFAFA;
+}
+
+.NB-layout {
+    overflow: hidden;
+    height: 100%;
+    width: 100%;
+    position: absolute;
+}
+
+a, a:active, a:hover, a:visited, button {
+    outline: none;
+}
+
+a img {
+    border: none;
+}
+
+.NB-hidden {
+    display: none;
+}
+
+.NB-group {
+    clear: both;
+    overflow: hidden;
+}
+.NB-right {
+    float: right;
+}
+
+hr {
+    border: none;
+    background-color: rgba(0, 0, 0, 0.3);
+    height: 1px;
+    width: 72%;
+    margin-left: auto;
+    margin-right: auto;
+}
+.NB-staff .NB-staff-only {
+    display: block;
+}
+
+/* =============== */
+/* = Splash page = */
+/* =============== */
+
+.right-pane {
+    display: none;
+}
+
+/* The story pane is a CSS grid container now (07-panes.css), so it has to be
+   shown as one: display:block would stack the toolbar above a full-height
+   story list instead of the 56px / 1fr rows the layout writes. */
+.NB-show-reader .right-pane {
+    display: grid;
+}
+
+.NB-splash {
+    display: block;
+}
+
+.NB-show-reader .NB-splash {
+    display: none;
+}
+
+#NB-splash {
+    display: block;
+    background-color: #F6F8F0;
+}
+
+.NB-show-reader #NB-splash {
+    display: none;
+}
+
+#NB-splash-overlay {
+    display: block;
+}
+
+.NB-show-reader #NB-splash-overlay {
+    display: none;
+}
+
+.NB-splash-bottom {
+    display: block;
+}
+
+.NB-show-reader .NB-splash-bottom {
+    display: none;
+}
+
+.NB-show-reader .NB-feeds-header-collapse-sidebar {
+    opacity: 1;
+    cursor: pointer;
+}
+
+.NB-show-reader .NB-feeds-header-collapse-sidebar:hover img {
+    opacity: .9;
+}
+
+.NB-show-reader .NB-welcome-footer {
+    display: none;
+}
+
+.NB-splash-heading {
+    display: none;
+}
+
+.NB-manage {
+    position: absolute;
+    right: 204px;
+    z-index: 1;
+    overflow: hidden;
+    width: 180px;
+    margin: 0 24px 32px 0;
+}
+
+.NB-account-wide {
+    flex: 1;
+    margin: 24px 24px 32px 0;
+}
+
+.NB-dashboard-account {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+}
+
+.NB-account .NB-module-header {
+    flex-basis: 100%;
+}
+
+.NB-account .NB-signup-hidden {
+    display: none;
+}
+
+/* ============ */
+/* = Callouts = */
+/* ============ */
+
+.NB-callout {
+    position: absolute;
+    -moz-box-shadow: 2px 2px 5px var(--nb-legacy-909090);
+    -webkit-box-shadow: 2px 2px 5px var(--nb-legacy-909090);
+    box-shadow: 2px 2px 5px var(--nb-legacy-909090);
+    border: 1px solid var(--nb-legacy-707070);
+    background: #E2FFCC url('/media/embed/reader/callout_background.png') repeat-x 0 0;
+    display: none;
+    z-index: 10;
+}
+
+.NB-callout .NB-callout-text {
+    font-size: 14px;
+    font-weight: bold;
+}
+
+.NB-callout .NB-callout-container {
+    position: relative;
+    padding: 4px 12px;
+}
+
+.NB-callout .NB-callout-container .NB-callout-arrow {
+    width: 32px;
+    height: 14px;
+    background: transparent url('/media/embed/reader/callout_arrow.png') no-repeat 0 0;
+    position: absolute;
+    bottom: -14px;
+    left: 4px;
+}
+
+.NB-callout-ftux {
+    left: 2px;
+    bottom: 51px;
+}
+
+.NB-callout-ftux-signup {
+    right: 10px;
+}
+
+.NB-callout-ftux-signup .NB-callout-container .NB-callout-arrow {
+    left: auto;
+    right: -1px;
+}
+
+.NB-callout-mouse-indicator {
+    top: -3px;
+    left: 26px;
+    opacity: 0;
+}
+
+.NB-callout-mouse-indicator .NB-callout-container {
+    padding: 1px 12px 1px;
+}
+
+.NB-callout-mouse-indicator .NB-callout-container .NB-callout-arrow {
+    width: 12px;
+    height: 26px;
+    background: transparent url('/media/embed/reader/callout_arrow_side.png') no-repeat 0 0;
+    top: 0px;
+    left: -11px;
+}
+
+/* ================ */
+/* = Content Pane = */
+/* ================ */
+
+/* These four panes keep their !important: media/js/newsblur/common/pane_layout.js
+   writes inline width, height and overflow as it lays out the grid, and an
+   author flag is the only thing that outranks an inline style. Everywhere else
+   in the reader stylesheets the flag was redundant and has been removed. */
+.content-pane {
+    display: none;
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+    width: auto !important;
+    height: auto !important;
+}
+
+.left-pane {
+    display: none;
+    overflow: hidden !important;
+    background-color: var(--nb-legacy-f7f8f5);
+}
+
+.left-center-content {
+    display: none;
+    overflow-x: hidden !important;
+    overflow-y: auto !important;
+}
+
+.right-pane {
+    display: none;
+    overflow-y: auto !important;
+    overflow-x: hidden !important;
+}
+.NB-feedlists .NB-socialfeeds .feed {
+    background-color: #d6e3da;
+    /* border-top-color: #E6ECE8; */
+    /* border-bottom-color: #E6ECE8; */
+}
+
+.NB-feedlists .NB-socialfeeds {
+    display: none;
+    /* border-bottom: 1px solid #B7BBAA; */
+    background-color: #d6e3da;
+}
+
+.NB-feedlists .NB-socialfeeds .feed .feed_title {
+    text-shadow: 0 1px 0 rgba(250, 250, 250, .4);
+}
+

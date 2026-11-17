@@ -1,0 +1,144 @@
+{% load i18n %}
+{% load utils_tags %}
+
+<div class="NB-module NB-module-manage">
+	<h3 class="NB-module-content-header">
+		{% trans "Manage NewsBlur" %}
+	</h3>
+
+    <div class="NB-module-item">
+        <div class="NB-module-stats-counts">
+			<ul class="NB-menu-manage NB-menu-manage-notop">
+				<li class="NB-menu-item NB-menu-manage-theme">
+					<div class="NB-menu-manage-image"></div>
+					<ul class="segmented-control NB-options-theme">
+						<li class="NB-taskbar-button NB-theme-option NB-options-theme-light">
+							<span class="NB-task-title">{% trans "Light" context "theme" %}</span>
+						</li>
+						<li class="NB-taskbar-button NB-theme-option NB-options-theme-dark">
+							<span class="NB-task-title">{% trans "Dark" context "theme" %}</span>
+						</li>
+						<li class="NB-taskbar-button NB-theme-option NB-options-theme-auto">
+							<span class="NB-task-title">{% trans "Auto" context "theme" %}</span>
+						</li>
+					</ul>
+				</li>
+				<li class="NB-menu-item NB-menu-manage-size">
+					<div class="NB-menu-manage-image"></div>
+					<ul class="segmented-control NB-options-size">
+						<li class="NB-taskbar-button NB-feed-size-option NB-options-feed-size-xs">
+							<span class="NB-task-title">{% trans "XS" %}</span>
+						</li>
+						<li class="NB-taskbar-button NB-feed-size-option NB-options-feed-size-s">
+							<span class="NB-task-title">{% trans "S" %}</span>
+						</li>
+						<li class="NB-taskbar-button NB-feed-size-option NB-options-feed-size-m">
+							<span class="NB-task-title">{% trans "M" %}</span>
+						</li>
+						<li class="NB-taskbar-button NB-feed-size-option NB-options-feed-size-l">
+							<span class="NB-task-title">{% trans "L" %}</span>
+						</li>
+						<li class="NB-taskbar-button NB-feed-size-option NB-options-feed-size-xl">
+							<span class="NB-task-title">{% trans "XL" %}</span>
+						</li>
+					</ul>
+				</li>
+				<li class="NB-menu-item NB-menu-manage-font">
+					<div class="NB-menu-manage-image"></div>
+					<ul class="segmented-control NB-options-font">
+						<li class="NB-taskbar-button NB-feed-font-option NB-options-feed-font-whitney NB-theme-feed-font-whitney">
+							<span class="NB-task-title">{% trans "Whitney" %}</span>
+						</li>
+						<li class="NB-taskbar-button NB-feed-font-option NB-options-feed-font-lucida NB-theme-feed-font-lucida">
+							<span class="NB-task-title">Lucida Grande</span>
+						</li>
+						<li class="NB-taskbar-button NB-feed-font-option NB-options-feed-font-gotham NB-theme-feed-font-gotham">
+							<span class="NB-task-title">Gotham</span>
+						</li>
+					</ul>
+				</li>
+				<li class="NB-menu-separator"></li>
+				<li class="NB-menu-item NB-menu-manage-preferences">
+					<div class="NB-menu-manage-image"></div>
+					<div class="NB-menu-manage-title">
+						{% trans "Preferences" %}
+					</div>
+				</li>
+				<li class="NB-menu-item NB-menu-manage-account">
+					<div class="NB-menu-manage-image"></div>
+					<div class="NB-menu-manage-logout NB-modal-submit-grey NB-modal-submit-button">
+						{% trans "Logout" %}
+					</div>
+					<div class="NB-menu-manage-title">
+						{% trans "Account" %}
+					</div>
+				</li>
+				<li class="NB-menu-separator"></li>
+				<li class="NB-menu-item NB-menu-manage-import">
+					<div class="NB-menu-manage-image"></div>
+					<div class="NB-menu-manage-title">
+						{% trans "Import sites" %}
+					</div>
+				</li>
+                <li class="NB-menu-item NB-menu-manage-export">
+                	<a class="NB-menu-manage-link" href="{% url 'export-settings' %}" download>
+                		<div class="NB-menu-manage-image"></div>
+                		<div class="NB-menu-manage-title">
+                			{% trans "Export settings" %}
+                		</div>
+                	</a>
+                </li>
+                <li class="NB-menu-item NB-menu-manage-import-settings">
+                	<label class="NB-menu-manage-link">
+                		<input type="file" class="NB-menu-manage-import-file" accept="application/json,.json" hidden>
+                		<div class="NB-menu-manage-image"></div>
+                		<div class="NB-menu-manage-title">
+                			{% trans "Import settings" %}
+                		</div>
+                	</label>
+                </li>
+                <li class="NB-menu-item NB-menu-manage-statistics">
+                    <div class="NB-menu-manage-image"></div>
+                    <div class="NB-menu-manage-title">
+                        {% trans "Statistics" %}
+                    </div>
+                </li>
+				<li class="NB-menu-item NB-menu-manage-keyboard">
+					<div class="NB-menu-manage-image"></div>
+					<div class="NB-menu-manage-title">
+						{% trans "Keyboard" %}
+					</div>
+				</li>
+				<li class="NB-menu-separator"></li>
+				<li class="NB-menu-item NB-menu-manage-organizer">
+					<div class="NB-menu-manage-image"></div>
+					<div class="NB-menu-manage-title">
+						{% trans "Organize Sites" %}
+					</div>
+				</li>
+				<li class="NB-menu-item NB-menu-manage-feedchooser">
+					<div class="NB-menu-manage-image"></div>
+					<div class="NB-menu-manage-title">
+						{% trans "Mute Sites" %}
+					</div>
+				</li>
+				<li class="NB-menu-item NB-menu-manage-trainer">
+					<div class="NB-menu-manage-image"></div>
+					<div class="NB-menu-manage-title">
+						{% trans "Trainer" %}
+					</div>
+				</li>
+				<li class="NB-menu-item NB-menu-manage-mark-read NB-menu-manage-site-mark-read">
+					<div class="NB-menu-manage-image"></div>
+					<div class="NB-menu-manage-title">
+						{% trans "Mark all as read" %}
+					</div>
+				</li>
+				<li class="NB-menu-manage-site-info" style="border-top-left-radius: 8px; border-top-right-radius: 8px; border-bottom-left-radius: 0px; border-bottom-right-radius: 0px; display: none;">
+					<div class="NB-menu-manage-image"></div><span class="NB-menu-manage-title">{% trans "Manage NewsBlur" %}</span>
+				</li>
+			</ul>
+
+        </div>
+    </div>
+</div>

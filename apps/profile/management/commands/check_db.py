@@ -1,0 +1,21 @@
+import time
+
+from django.core.management.base import BaseCommand
+from django.db import connections
+from django.db.utils import OperationalError
+
+
+class Command(BaseCommand):
+    help = "Wait for the PostgreSQL database to become available (used during container startup)."
+
+    def handle(self, *args, **options):
+        db_conn = connections["default"]
+        connected = False
+        while not connected:
+            try:
+                db_conn.cursor()
+                connected = True
+                # print("Connected to postgres")
+            except OperationalError as e:
+                print(f" ---> Waiting for newsblur_db_postgres: {e}")
+                time.sleep(5)

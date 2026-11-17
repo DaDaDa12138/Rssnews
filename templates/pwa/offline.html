@@ -1,0 +1,25 @@
+{% load i18n static %}{% get_current_language as LANGUAGE_CODE %}{% get_current_language_bidi as LANGUAGE_BIDI %}{% get_media_prefix as MEDIA_PREFIX %}<!DOCTYPE html>
+<html lang="{{ LANGUAGE_CODE }}" dir="{% if LANGUAGE_BIDI %}rtl{% else %}ltr{% endif %}">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#1875F3">
+    <title>{% trans "Offline" %} · NewsBlur</title>
+    <link rel="icon" href="{{ MEDIA_PREFIX }}img/pwa/icon-192.png" sizes="192x192">
+    <link rel="apple-touch-icon" href="{{ MEDIA_PREFIX }}img/pwa/apple-touch-icon.png">
+    <link rel="stylesheet" href="{% static 'css/pwa-offline.css' %}?v={{ cache_version }}">
+  </head>
+  <body>
+    <main class="NB-offline" role="main">
+      <img class="NB-offline-icon"
+           src="{{ MEDIA_PREFIX }}img/pwa/icon-192.png"
+           width="88"
+           height="88"
+           alt="">
+      <p class="NB-offline-kicker">NewsBlur</p>
+      <h1>{% trans "You're offline" %}</h1>
+      <p>{% trans "NewsBlur can't reach the server right now. Your feeds and saved stories will be here when the connection returns." %}</p>
+      <a class="NB-offline-button" href="/">{% trans "Try again" %}</a>
+    </main>
+  </body>
+</html>

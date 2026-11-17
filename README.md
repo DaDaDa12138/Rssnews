@@ -37,7 +37,7 @@
 
 web 容器里跑两套进程，外面没有 nginx，Django 自己发静态文件：
 
-`@
+```
                      +-------------------- newsblur_web --------------------+
   浏览器 ---:8080--> | gunicorn 1 worker x 16 threads --> Django (WSGI)                  |
                      | celery worker --pool=solo + celery beat   (supervisor.py 托管)   |
@@ -45,7 +45,7 @@ web 容器里跑两套进程，外面没有 nginx，Django 自己发静态文件
                              |                     |                      |
                      postgres:18               redis:8               deeplx（翻译）
                      127.0.0.1:5434            127.0.0.1:6579        仅 compose 内网 1188
-`@
+```
 
 | 容器 | 镜像 | 端口 | 作用 |
 | --- | --- | --- | --- |
@@ -71,7 +71,7 @@ web 容器里跑两套进程，外面没有 nginx，Django 自己发静态文件
 
 最短路径：
 
-`@bash
+```bash
 git clone https://github.com/DaDaDa12138/Rssnews.git
 cd Rssnews
 cp .env.example .env
@@ -79,7 +79,7 @@ sed -i "s/^CURRENT_UID=.*/CURRENT_UID=$(id -u)/; s/^CURRENT_GID=.*/CURRENT_GID=$
 make            # docker compose up -d，首次会构建镜像，3-10 分钟
 make migrate    # 建表
 docker exec -it newsblur_web python manage.py createsuperuser
-`@
+```
 
 然后打开 <http://localhost:8080/>，用刚建的账号登录。
 
@@ -89,53 +89,53 @@ docker exec -it newsblur_web python manage.py createsuperuser
 
 ### 1. 取代码
 
-`@bash
+```bash
 git clone https://github.com/DaDaDa12138/Rssnews.git
 cd Rssnews
-`@
+```
 
 `static/`、`media/js/build/`、`docker/volumes/`、`logs/*.log` 都不在 git 里：前两个由容器启动时生成，后两个是运行时数据。所以第一次启动比之后慢十几秒。
 
 ### 2. 写 .env
 
-`@bash
+```bash
 cp .env.example .env
 sed -i "s/^CURRENT_UID=.*/CURRENT_UID=$(id -u)/; s/^CURRENT_GID=.*/CURRENT_GID=$(id -g)/" .env
-`@
+```
 
 Compose 自动读同目录的 `.env` 做变量插值。`CURRENT_UID/GID` 决定容器以哪个身份写 bind mount 里的 `logs/` 和 `static/`；写错就会出现 root 拥有的文件，之后备份、清日志都会踩权限。
 
 ### 3. 起容器
 
-`@bash
+```bash
 make        # 等价于 docker compose up -d，首次自动 build
-`@
+```
 
 构建做三件事：`python:3.13-slim` 基础镜像；用 `uv` 按 `config/requirements.lock` 装带 hash 校验的依赖；从 npm registry 取 esbuild 0.25.5 二进制（运行阶段没有 Node）。
 
 ### 4. 建表
 
-`@bash
+```bash
 make migrate
-`@
+```
 
 首次建 40 多张表，并在 `apps/rss_feeds/migrations/0006_mstory_story_text.py` 里执行 `CREATE EXTENSION pg_trgm`（全文搜索用）。数据库用户就是镜像初始化时的超级用户，所以扩展装得上。
 
 ### 5. 验证
 
-`@bash
+```bash
 make ps
 curl -fsS http://localhost:8080/health-check/                                    # OK
 curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/account/login/     # 200
-`@
+```
 
 `make ps` 四个容器都该是 `Up`。web 启动时先跑 `manage.py check_db` 等 Postgres 可连（每 5 秒重试），等不到会打印 `[supervisor] check_db failed with ..., starting anyway` 然后照常启动——看到这行说明数据库还没就绪，等十几秒再重试请求即可。想看启动过程用 `make logs`，正常会依次出现 `bundling ES modules`、`collecting static assets`、Celery 的 `ready`、gunicorn 的 `Listening at: http://0.0.0.0:8000`。
 
 宿主机上确认监听：
 
-`@bash
+```bash
 ss -ltnp | grep -E '8080|5434|6579'
-`@
+```
 
 ## 建账号与加订阅
 
@@ -146,9 +146,9 @@ ss -ltnp | grep -E '8080|5434|6579'
 - 网页注册：<http://localhost:8080/account/signup/>
 - 命令行：
 
-`@bash
+```bash
 docker exec -it newsblur_web python manage.py createsuperuser
-`@
+```
 
 `AUTO_PREMIUM`、`AUTO_PREMIUM_NEW_USERS`、`AUTO_ENABLE_NEW_USERS` 都是 `True`，本地实例没有付费墙，注册即可用全部功能。
 
@@ -160,9 +160,9 @@ docker exec -it newsblur_web python manage.py createsuperuser
 
 阅读器左侧站点栏顶部的 **Add Site**（见 `templates/reader/feeds_skeleton.xhtml`），粘贴 feed 地址，例如：
 
-`@
+```
 https://www.ruanyifeng.com/blog/atom.xml
-`@
+```
 
 保存后由 Celery 在一分钟内调度第一次抓取，`make logs` 里能看到 `Task task-feeds[...] received`。想立刻抓某一条，在站点栏右键 feed 选 Insta-fetch。
 
@@ -241,36 +241,36 @@ OPML 批量导入的接口是 `POST /import/opml_upload`（multipart 字段名 `
 
 数据库是唯一真源，`make backup` 出纯 SQL：
 
-`@bash
+```bash
 make backup
 ls -lh backups/                      # postgres-YYYYmmdd-HHMM.sql
-`@
+```
 
 恢复（先停写入更稳）：
 
-`@bash
+```bash
 make down
 make up
 sleep 10
 docker compose exec -T newsblur_db_postgres psql -U newsblur -d newsblur < backups/postgres-20260101-0300.sql
-`@
+```
 
 冷备（连 Redis 里的会话和未读计数一起）：
 
-`@bash
+```bash
 make down
 tar czf rssnews-data-$(date +%F).tgz docker/volumes
 make up
-`@
+```
 
 升级：
 
-`@bash
+```bash
 git pull
 make build
 make up
 make migrate
-`@
+```
 
 迁移按向前兼容写（新列可空、先加后收紧），但没有回滚脚本；跨大版本升级前先 `make backup`。
 
@@ -285,15 +285,15 @@ make migrate
 
 Caddy 最省事：
 
-`@
+```
 rss.example.com {
     reverse_proxy 127.0.0.1:8080
 }
-`@
+```
 
 nginx：
 
-`@
+```
 server {
     listen 443 ssl http2;
     server_name rss.example.com;
@@ -307,16 +307,16 @@ server {
         proxy_read_timeout 120s;
     }
 }
-`@
+```
 
 gunicorn 的 `timeout` 是 120 秒（`config/gunicorn_conf.py`），反代的读超时不要低于它，否则抓原文的慢请求会被截断。
 
 上线后自查：
 
-`@bash
+```bash
 make check-deploy
 curl -sI https://rss.example.com/health-check/ | head -1
-`@
+```
 
 `check-deploy` 会留两条告警：`security.W004`（HSTS 交给边缘代理）和 `security.W019`（阅读器要 iframe 自己的预览，`X_FRAME_OPTIONS` 只能是 `SAMEORIGIN`）。出现别的告警就是配置有漏。
 
@@ -343,7 +343,7 @@ curl -sI https://rss.example.com/health-check/ | head -1
 
 ## 目录结构
 
-`@
+```
 .
 ├── apps/                  Django 应用
 │   ├── rss_feeds/         抓取、解析、搜索、正文抽取
@@ -368,33 +368,33 @@ curl -sI https://rss.example.com/health-check/ | head -1
 ├── Makefile               所有运维入口
 ├── docker-compose.yml     四个服务
 └── .env.example           配置模板
-`@
+```
 
 ## 开发与测试
 
-`@bash
+```bash
 make check                                   # Django system check
 make test                                    # 全部 apps 测试，--failfast
 make test SCOPE=apps.rss_feeds ARGS="-v 2"   # 单个应用，详细输出
-`@
+```
 
 测试必须跑在容器里（宿主机没有依赖）：`make test` 实际执行的是 `docker exec -t newsblur_web python manage.py test ...`。仓库里有 52 个 `test_*.py`、400 多个测试方法。
 
 浏览器 smoke 测试：
 
-`@bash
+```bash
 make smoke                 # 需要 DEBUG 打开，且本机有 Chrome
 SMOKE_BASE_URL=http://localhost:8080 SMOKE_USER=demo make smoke
-`@
+```
 
 它通过 DevTools 协议驱动真实 Chrome，走 `/reader/dev/autologin/` 登录，不依赖 npm 包。
 
 开发时的自动登录（`DEBUG=True` 且 Host 是 localhost / 127.0.0.1 / 192.168. / 10. / 172. 才可用，生产模式返回 403）：
 
-`@
+```
 http://localhost:8080/reader/dev/autologin/
 http://localhost:8080/reader/dev/autologin/<username>/
-`@
+```
 
 改前端资源：源文件在 `media/`，`media/js/modules/` 里的 ES module 由 `utils/build_modules.py` 打成 `media/js/build/modules.js`，`media/` 再经 django-pipeline 压成带 hash 的 `static/` 产物。这两步 entrypoint 每次启动按 mtime 判断要不要重跑，所以改完 `make reload-web` 就够。
 
@@ -416,13 +416,13 @@ http://localhost:8080/reader/dev/autologin/<username>/
 
 `<stream>` 支持 `feed/<id>`、`user/-/label/<文件夹>`、`user/-/state/com.google/starred`、`user/-/state/com.google/reading-list`。查询参数：`n`（条数，默认 20，上限 100）、`c`（偏移）、`r=o`（正序）、`it` / `xt`（包含或排除 `.../read`、`.../starred`）。
 
-`@bash
+```bash
 TOKEN=$(curl -s -X POST http://localhost:8080/reader/api/0/login/ \
   -d 'Email=me@example.com&Passwd=secret' | sed -n 's/^Auth=//p')
 
 curl -s -H "Authorization:GoogleLogin auth=$TOKEN" \
   'http://localhost:8080/reader/api/0/stream/contents/user/-/state/com.google/reading-list?n=5'
-`@
+```
 
 这套 API 只读写现有订阅，没有「加订阅」的端点：订阅走界面或 OPML。
 
@@ -445,9 +445,9 @@ curl -s -H "Authorization:GoogleLogin auth=$TOKEN" \
 
 MIT，见 [LICENSE.md](LICENSE.md)。原始版权声明保留：
 
-`@
+```
 Copyright (c) 2009 Samuel Clay, NewsBlur <samuel@newsblur.com>
-`@
+```
 
 这个仓库是裁剪与改动版，不是 NewsBlur 官方发行版，也不受其支持。
 
@@ -457,7 +457,7 @@ Copyright (c) 2009 Samuel Clay, NewsBlur <samuel@newsblur.com>
 
 按顺序执行，每步给出期望，任一步不符就停：
 
-`@bash
+```bash
 # 0. 依赖
 docker compose version                 # v2.x
 id -u; id -g                           # 与 .env 的 CURRENT_UID/GID 一致
@@ -484,7 +484,7 @@ docker exec -it newsblur_web python manage.py createsuperuser
 
 # 7. 端到端：登录拿 token，再读条目流
 curl -s -X POST http://localhost:8080/reader/api/0/login/ -d 'Email=<user>&Passwd=<pass>'   # 有 Auth= 行
-`@
+```
 
 失败时的判断顺序：
 
